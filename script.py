@@ -2,70 +2,74 @@
 灵光一现 · 光线光学沙盘（pygame 单文件实现）
 
 【一句话简介】
-在一块 8000 x 8000 格的网格里摆放八类光学元件，程序实时求解光路：光沿直线走、被镜子
-反射、被半透分光、把聚光镜点亮、在光敏晶体上做 AND 运算、用存储石记住每一位电平、
-并被延时块按“刻”延后放行。本质上是一台用光线搭出来的可编程时序电路沙盘。
+在一块 8000 x 8000 格的网格里摆放八类光学元件，程序实时求解光路：光沿直线走、被反射镜
+反射、被分束器分光、把耦合器点亮、在光与门（AND Gate）上做 AND 运算、用光锁存器记住每一位电平、
+并被延迟线按“刻”延后放行。本质上是一台用光线搭出来的可编程时序电路沙盘。
 
 【运行环境与快速开始】
     依赖：Python 3.8+ 与 pygame（pip install pygame）；无其它第三方库，不联网，无素材文件。
-    运行：python 本文件名.py        # 例如 python 灵光一现_注释完善版.py；窗口可拖大缩小，60 FPS
+    运行：python 本文件名.py        # 例如 python 灵光一现_耦合器分束版.py；窗口可拖大缩小，60 FPS
     存档：脚本同级的 saves/slot1-3.json（纯 JSON，可手工编辑；见 SAVE_VERSION）
 
 【元件一览：数字键 0-7 选工具；dir 一律指“输出边 / 凸起所指边”，0=上 1=右 2=下 3=左，顺时针】
-    0 block     方块：吸收光线，无状态，用来挡光与砌墙。
-    1 light     光源：沿 dir 发一束光；带手动开关（F），被别的光击中即熄灭。
-    2 mirror    折光镜：受光即开，按镜面朝向反射（dir 偶数画“/”，奇数画反斜）。
-    3 splitter  半透：本束直行透射，同时派生一束反射光，受光即开——分光的唯一手段。
-    4 collector 聚光镜：三入一出，被非逆向的光照到即激活，并从输出边另发一束。
-    5 crystal   光敏晶体（AND 门）：信号光沿透光轴穿过，控制光垂直入射只当开关，
+    0 wall      墙 Wall：吸收光线，无状态，用来挡光与砌墙。
+    1 laser     激光器 Laser：沿 dir 发一束光；带手动开关（F），被别的光击中即熄灭。
+    2 mirror    反射镜 Mirror：受光即开，按镜面朝向反射（dir 偶数画“/”，奇数画反斜）。
+    3 splitter  分束器 Splitter：本束直行透射，同时派生一束反射光，受光即开——
+                唯一“分光后主光仍直行”的器件（耦合器反向分束没有直行分量）。
+    4 coupler 耦合器 Coupler：双向 1<->N 端口，正向汇聚 + 反向 T 型分束二合一——
+                正向：1~3 条非逆向输入边有光即从输出边 dir 另发一束（三入一出）；
+                反向：光从输出边逆向进，则从两条相邻输入边各发一束，正对边被吞（T 型分束）。
+                同刻内正向 / 反向二选一（靠 is_lit 锁定），入射光一律停在本格。
+    5 and_gate   光与门 AND Gate：信号光沿透光轴穿过，控制光垂直入射只当开关，
                 两路在同一刻都到过才导通。
-    6 store     存储石：1 出 3 入；任一输入边出现新的 0->1 就翻转输出（记忆位），
+    6 latch     光锁存器 Latch：1 出 3 入；任一输入边出现新的 0->1 就翻转输出（记忆位），
                 输出置 1 时自己就沿 dir 发一束光。
-    7 delay     延时块：正方形加叉号，四边都是端口；任一面进来的光一律被吸收，
-                攒够 delay 刻之后才从“进来的那一侧的对边”原方向放出
+    7 delay_line  延迟线 Delay Line：正方形加正十字，四边都是端口；任一面进来的光一律被吸收，
+                攒够 ticks 刻之后才从“进来的那一侧的对边”原方向放出
                 ——全文件唯一真正跨刻的元件。
 
 【状态约定（两套，分工明确）】
-    用户态：is_on（只有光源带手动开关）、state（存储石记忆位）、delay（延时刻度）、dir；
+    用户态：is_on（只有激光器带手动开关）、state（光锁存器记忆位）、ticks（延迟刻度）、dir；
             只有这些会被写进存档。
     派生态：is_lit / axis_inputs / perp_inputs / input_dirs / pipe / out_ready / inject，
             一律由光路求解现算，不落盘。is_lit 恒等于“这一刻的光路算完之后它到底亮不亮”，
             渲染层只读它，因此贴图不可能再与真实状态不一致。
 
-【时序模型：全文件只有这一套，而且只与延时块有关】
+【时序模型：全文件只有这一套，而且只与延迟线有关】
     1. 全图只有一个“刻”，每刻固定 TICK_INTERVAL_S 秒（当前 0.1 秒）自动推进，不提供调速；
-       “刻”是唯一的时序单位，换算关系只有一条：延时刻度 n 刻 = n x TICK_INTERVAL_S 秒。
-    2. 一刻 = 解一次光路（镜 / 半透 / 聚光 / 晶体 AND / 存储石 / 光源熄灭全在这一刻之内
-       迭代到不动点）+ 刻末统一推进一次延迟线。除延时块以外的元件一律零刻延迟：
-       摆下去当场就是终态，晶体 AND 门同刻即亮即导通，不需要任何跨刻记忆。
-    3. 跨刻的记忆只有延时块的延迟线 pipe 一件：第 t 刻注入、第 t+delay 刻放出，
-       delay 只由刻数决定（1~12 刻），与光走了几格、这一刻解了几轮都无关。
-    4. 其余元件一概不碰延时：不读写 pipe / out_ready / inject，也不带跨刻状态。
-       光源被打灭、存储石翻转、晶体导通都只在本刻内成立，下一刻从头再解一次；
+       “刻”是唯一的时序单位，换算关系只有一条：延迟刻度 n 刻 = n x TICK_INTERVAL_S 秒。
+    2. 一刻 = 解一次光路（反射镜 / 分束器 / 耦合器 / 光与门 AND / 光锁存器 / 激光器熄灭全在这一刻之内
+       迭代到不动点）+ 刻末统一推进一次延迟队列。除延迟线以外的元件一律零刻延迟：
+       摆下去当场就是终态，光与门 AND 门同刻即亮即导通，不需要任何跨刻记忆。
+    3. 跨刻的记忆只有延迟线的延迟队列 pipe 一件：第 t 刻注入、第 t+ticks 刻放出，
+       ticks 只由刻数决定（1~12 刻），与光走了几格、这一刻解了几轮都无关。
+    4. 其余元件一概不碰延迟：不读写 pipe / out_ready / inject，也不带跨刻状态。
+       激光器被打灭、光锁存器翻转、光与门导通都只在本刻内成立，下一刻从头再解一次；
        于是“灯被对射打灭之后怎么都救不回来”这类死局在结构上就不存在了。
-    5. 只有编辑动作和 R 键会复位时序（刻号归零 + 清空全部延迟线）。
+    5. 只有编辑动作会复位时序（刻号归零 + 清空全部延迟队列）。
 
 【操作】
-    右键放置 | 左键擦除 | 中键拖拽平移 | 滚轮以光标为锚缩放（0.4x~5.0x）| WASD / 方向键平移
+    右键放置 | 左键/Del擦除光标格 | 中键拖拽平移 | 滚轮以光标为锚缩放（0.4x~5.0x）| WASD / 方向键平移
+    右键或 Enter 放置当前工具；Enter 可长按连续铺，光标移到哪放到哪（同格不重复压栈）
     0-7 选元件；Q / E 逆时针 / 顺时针旋转光标格元件
-        —— 压在延时块上 = 调它的延时刻度（1~12 刻）；
-        —— 当前工具是延时块且光标压在空格上 = 调放置预设刻度，可连着摆一排同刻度块。
-    F 光源切手动开关 / 存储石复位输出 / 延时块排空延迟线
-    R 复位时序：刻号归零 + 清空全部延迟线（想从头看清一遍信号走向时用）
+        —— 压在延迟线上 = 调它的延迟刻度（1~12 刻）；
+        —— 当前工具是延迟线且光标压在空格上 = 调放置预设刻度，可连着摆一排同刻度块。
+    F 激光器切手动开关 / 光锁存器复位输出 / 延迟线排空延迟队列
     M 小地图显隐；小地图内左键点击或拖拽直接跳转视口
     F1 / F2 / F3 存三个槽位（原子写盘）| F4 读最近一份
-    Enter + F4 粘贴图章：取存档 row/col 最小角对齐光标格整块平移并入当前世界（一步 Z 撤掉整块）
+    V 粘贴图章：取存档 row/col 最小角对齐光标格整块平移并入当前世界（一步 Z 撤掉整块）
     Z 撤销 | X 重做（放置 / 擦除 / 旋转 / F 开关 / 粘贴 / 读档均可撤；delta 快照，栈深 200）
 
 【HUD（左上角，纯 ASCII，规避中文字体缺失导致的渲染异常）】
     共 10 行：当前工具、工具条、鼠标操作、旋转与 F 键、小地图说明、存读与撤重、键位提示、
-    时序行（tick N + 延时预设 + 正在放行的延时块数 + 复位提示）、槽位与撤销栈深、
+    时序行（tick N + 延迟预设 + 正在放行的延迟线数 + 复位提示）、槽位与撤销栈深、
     末行光路收尾状态（ok rN / TRUNC / MAXR）。
 
 【光路求解与四道防卡死闸门】
     外层反复“重算一轮”直到无变化（上限 MAX_LIGHT_ROUNDS = 80 轮）；每轮做五件事：
-    清动态态 -> 消化射线队列（点亮镜 / 半透、记下被打灭的灯与受光的存储石输入边）
-    -> 晶体 AND -> 存储石上升沿 -> 光源熄灭锁定。
+    清动态态 -> 消化射线队列（点亮反射镜 / 分束器、记下被打灭的灯与受光的光锁存器输入边）
+    -> 光与门 AND -> 光锁存器上升沿 -> 激光器熄灭锁定。
     四道硬预算：单轮射线数 2 万、总步数 100 万、光段数 5 万、墙钟 0.30 秒，任一触发就地
     截断（已画光路保留，绝不补画猜测几何），HUD 末行报 TRUNC；跑满 80 轮仍不收敛报 MAXR。
     去重键 ctx.seen 记“从哪格、朝哪个方向进入目标格”：同一轮里重复该状态必是重复几何且
@@ -74,20 +78,20 @@
 【代码结构（章节号与文件内的分隔注释一一对应）】
     01 窗口与调色板           02 世界与相机           03 世界状态与时间步
     04 渲染资源（icon 预渲染 + 缩放缓存）            05 方向与坐标工具
-    06 光路追踪与延时刻线（核心：solve_tick / step_tick / _advance_delay_lines）
+    06 光路追踪与延迟线（核心：solve_tick / step_tick / _advance_delay_lines）
     07 渲染                   08 小地图（视口局部图，恒为主画面 0.05 倍）
     09 HUD                    10 输入处理             11 存读撤重（原子写盘 + delta 撤销）
     12 主循环
-    全文件“时序”只有一个入口 step_tick()：解一次光路 + 推一次延迟线 + 刻号加一；
+    全文件“时序”只有一个入口 step_tick()：解一次光路 + 推一次延迟队列 + 刻号加一；
     主循环按 TICK_INTERVAL_S 的固定节奏调它，没有模式分支、没有单步等待。
 
 【名词对照（读代码前先对齐口径）】
     刻 tick            唯一的时序单位，长度固定为 TICK_INTERVAL_S 秒。
-    注入 inject        本刻有光从某条边打进延时块，只在求解上下文里记账。
-    延迟线 pipe        每个延时块一条队列，每刻推进一格，长度上限就是它的刻数 delay。
-    放行 out_ready     刻末从延迟线队头弹出的方向，下一刻作为种子射线补进光路。
+    注入 inject        本刻有光从某条边打进延迟线，只在求解上下文里记账。
+    延迟队列 pipe        每个延迟线一条队列，每刻推进一格，长度上限就是它的刻数 ticks。
+    放行 out_ready     刻末从延迟队列队头弹出的方向，下一刻作为种子射线补进光路。
     基线 _baseline_reset  把全图清回“这一刻开始时它应处的态”，口径全文件唯一。
-    不动点 converged   一轮下来晶体导通集、存储石翻转、熄灭灯集都不再变化。
+    不动点 converged   一轮下来光与门导通集、光锁存器翻转、熄灭灯集都不再变化。
 """
 import copy
 import json
@@ -112,13 +116,17 @@ screen = pygame.display.set_mode((WINDOW_WIDTH, WINDOW_HEIGHT), pygame.RESIZABLE
 pygame.display.set_caption("灵光一现")
 clock = pygame.time.Clock()                      # 固定 60 FPS
 
-COLOR_BG = (30, 30, 30)
-COLOR_GRID = (60, 60, 60)
-COLOR_ON = (100, 149, 237)                       # 元件“开”态与光路颜色
-COLOR_OFF = (105, 105, 105)                      # 元件“关”态
-COLOR_HOVER = (255, 255, 255, 30)
-COLOR_HUD_TEXT = COLOR_ON
-COLOR_HUD_BG = (0, 0, 0, 80)
+# 全文件唯一色板，尽可能少：COLOR_ON / COLOR_OFF 是两个主题色，其余只留结构必需项。
+# 各面板的半透明底（HUD / 小地图 / 快捷栏 / 悬停高亮）不再各存色常量，统一由 _tint 现算。
+COLOR_ON = (100, 149, 237)                       # 主题色·开态 / 光路 / 选中 / 悬停高亮（蓝）
+COLOR_OFF = (105, 105, 105)                      # 主题色·关态 / 未选中 / 小地图未受光（灰）
+COLOR_BG = (30, 30, 30)                          # 深色底：屏幕背景与各面板半透明底的基色
+COLOR_GRID = (60, 60, 60)                        # 结构线：网格 / 小地图边框 / 世界边界线
+CLEAR = (0, 0, 0, 0)                             # 全透明：贴图挖空专用
+
+def _tint(color, alpha):
+    """给不透明色加 alpha 通道，得到半透明面板底；alpha 是功能参数，不另存颜色常量。"""
+    return (color[0], color[1], color[2], alpha)
 
 # ── 02. 世界与相机 ────────────────────────────────────────────────
 # 三套坐标系，全文件换算只走这几个量，不要在别处另算一套：
@@ -149,8 +157,8 @@ MAX_FRAME_DT_S = 0.05                            # 单帧 dt 上限，防切后�
 #      渲染 / 光路 / 小地图 / 存档都直接读它，所以不存在“两边不一致”这类 bug 的容身之处。
 #   2) 元件字段分用户态与派生态两套（字段清单见文件头 docstring）：派生态一律每刻重算，
 #      既不许进存档，也不许当跨刻记忆用——这是“贴图与真实状态不会打架”的结构保证。
-#   3) 时序只由 tick_index（刻号）与延时块的 pipe（延迟线）两样构成，
-#      除延时块外没有任何东西记得上一刻发生过什么。
+#   3) 时序只由 tick_index（刻号）与延迟线的 pipe（延迟队列）两样构成，
+#      除延迟线外没有任何东西记得上一刻发生过什么。
 Coord = Tuple[int, int]                          # 格坐标 (row, col)
 Point = Tuple[float, float]                      # 世界像素坐标 (x, y)
 Segment = Tuple[Point, Point]                    # 一段光路
@@ -163,33 +171,36 @@ def _etype(data: dict) -> str:
     return element_type if isinstance(element_type, str) else ''
 
 grid_data: Dict[Coord, dict] = {}                # (row, col) -> 元件数据（唯一数据源）
-current_tool = 1                                 # 默认拿光源：一开机右键就能玩
+current_tool = 1                                 # 默认拿激光器：一开机右键就能玩
 grid_changed = True                              # 脏标记：元件变化时置 True，主循环据此补走一刻
 cached_ray_segments: List[Segment] = []          # 上一次求解的光段结果，渲染只读它
 
-TOOL_TYPES = ('block', 'light', 'mirror', 'splitter', 'collector', 'crystal', 'store',
-             'delay')
-SWITCHABLE_TYPES = ('light',)                    # 只有光源带 F 手动开关
+TOOL_TYPES = ('wall', 'laser', 'mirror', 'splitter', 'coupler', 'and_gate', 'latch',
+             'delay_line')
+SWITCHABLE_TYPES = ('laser',)                    # 只有激光器带 F 手动开关
 TOOL_SPECS = {                                   # 放置数据的唯一定义处（lambda 保证每格新对象）
-    'block': lambda: {'type': 'block', 'dir': 0},
-    'light': lambda: {'type': 'light', 'dir': 0, 'is_on': True},
+    'wall': lambda: {'type': 'wall', 'dir': 0},
+    'laser': lambda: {'type': 'laser', 'dir': 0, 'is_on': True},
     'mirror': lambda: {'type': 'mirror', 'dir': 0, 'is_lit': False},
     'splitter': lambda: {'type': 'splitter', 'dir': 0, 'is_lit': False},
-    'collector': lambda: {'type': 'collector', 'dir': 0},
-    'crystal': lambda: {'type': 'crystal', 'dir': 0},
-    'store': lambda: {'type': 'store', 'dir': 0, 'is_lit': False, 'state': 0,
+    'coupler': lambda: {'type': 'coupler', 'dir': 0},
+    'and_gate': lambda: {'type': 'and_gate', 'dir': 0},
+    'latch': lambda: {'type': 'latch', 'dir': 0, 'is_lit': False, 'state': 0,
                       'in_levels': frozenset()},
-    # delay 四向对称，dir 恒 0 只为与其余元件共用贴图与序列化口径；
-    # inject / pipe / out_ready 都是时序态：inject 是本刻注入账，pipe 是延迟线，
+    # delay_line 四向对称，dir 恒 0 只为与其余元件共用贴图与序列化口径；
+    # inject / pipe / out_ready 都是时序态：inject 是本刻注入账，pipe 是延迟队列，
     # out_ready 是本刻该放行的方向。三者一律不写盘（见 PERSIST_FIELDS 注释）。
-    'delay': lambda: {'type': 'delay', 'dir': 0, 'delay': delay_setting,
+    'delay_line': lambda: {'type': 'delay_line', 'dir': 0, 'ticks': delay_line_setting,
                       'is_lit': False, 'inject': set(), 'pipe': [], 'out_ready': ()},
 }
-TOOL_NAMES = ['%d %s' % (i, name) for i, name in enumerate(TOOL_TYPES)]
+# 工具显示名表：HUD 为纯 ASCII，元件用英文短名（与文件头命名表一一对应）
+TOOL_DISPLAY = ['Wall', 'Laser', 'Mirror', 'Splitter', 'Coupler', 'AND Gate', 'Latch',
+                'Delay Line']
+TOOL_NAMES = ['%d %s' % (i, name) for i, name in enumerate(TOOL_DISPLAY)]
 
 MAX_RAY_STEPS = WORLD_COLS + WORLD_ROWS          # 单束上限＝世界曼哈顿直径，合法长折线不误截
 MAX_LIGHT_ROUNDS = 80                            # 外层迭代上限
-# 防卡死硬预算：单束上限只 bound 住一条射线，半透每过一次多派生一束，射线总数不受它约束。
+# 防卡死硬预算：单束上限只 bound 住一条射线，分束器每过一次多派生一束，射线总数不受它约束。
 # 故整轮另有四道闸门，任一触发就地截断（已画光路保留、不补画猜测几何），HUD 报 TRUNC。
 MAX_RAYS_PER_ROUND = 20000
 MAX_STEPS_PER_ROUND = 1000000
@@ -197,15 +208,16 @@ MAX_TRACE_SEGMENTS = 50000
 TRACE_TIME_LIMIT_S = 0.30
 trace_note = 'ok'                                # 上一轮光路收尾状态，HUD 末行直接显示
 
-# 时序：全图只有一个“刻”，长度固定；跨刻记忆只有延时块的延迟线这一件
-DELAY_DEFAULT_TICKS = 3                          # 放置时写入的默认延时刻度（单位：刻）
-DELAY_MIN_TICKS, DELAY_MAX_TICKS = 1, 12         # Q / E 调刻度的合法区间
+# 时序：全图只有一个“刻”，长度固定；跨刻记忆只有延迟线的延迟队列这一件
+DELAY_LINE_DEFAULT_TICKS = 3                          # 放置时写入的默认延迟刻度（单位：刻）
+DELAY_LINE_MIN_TICKS, DELAY_LINE_MAX_TICKS = 1, 12         # Q / E 调刻度的合法区间
 TICK_INTERVAL_S = 0.1                            # 每刻固定长度（秒），不提供调速按键
-tick_index = 0                                   # 已推进的刻数（编辑 / 撤销 / 读档 / R 后归零）
-delay_ready = 0                                  # 上一刻结束时正在放行的延时块数
-timeline_present = False                         # 世界里是否存在延时块（缓存标志）
+TICK_DISPLAY_WRAP = 100                          # HUD 显示的刻号到达该值后归零（0~99 循环，仅影响显示）
+tick_index = 0                                   # 已推进的刻数（编辑 / 撤销 / 读档后归零，显示到阈值循环归零）
+delay_line_ready = 0                                  # 上一刻结束时正在放行的延迟线数
+timeline_present = False                         # 世界里是否存在延迟线（缓存标志）
 tick_note = ''                                   # 复位提示，HUD 时序行显示
-delay_setting = DELAY_DEFAULT_TICKS              # 下一个延时块的刻度（Q/E 在空格上调它）
+delay_line_setting = DELAY_LINE_DEFAULT_TICKS              # 下一个延迟线的刻度（Q/E 在空格上调它）
 
 # ── 04. 渲染资源：icon 一律预渲染，四方向共用一套工厂 ──────────────
 # 全文件没有一处“每帧即时 draw 元件”：每个元件图标只画一次，之后全部走 blit。
@@ -214,18 +226,16 @@ delay_setting = DELAY_DEFAULT_TICKS              # 下一个延时块的刻度�
 # 因此 15 万元件级别的画面也只画 8 类 x 2 色 x 4 向 = 64 张基准图加当前缩放档位的副本；
 # 元件的“亮 / 暗”是换贴图名（xxx_on / xxx_off），不是改像素，颜色永远只有两套。
 ICON_SIZE = BASE_CELL_SIZE
-ICON_MAIN = int(ICON_SIZE * 0.7)                 # 光源主体边长
-ICON_BLOCK = int(ICON_SIZE * 0.8)
+ICON_MAIN = int(ICON_SIZE * 0.7)                 # 激光器主体边长
+ICON_WALL = int(ICON_SIZE * 0.8)
 ICON_PROTRUDE = max(3, int(ICON_SIZE * 0.2))     # 输出方向凸起边长
 ICON_LINE_W = max(2, int(ICON_SIZE * 0.1))
 ICON_INSET = int(ICON_SIZE * 0.2)
-ICON_BAR_LEN = int(ICON_SIZE * 0.88)             # 晶体栅条
+ICON_BAR_LEN = int(ICON_SIZE * 0.88)             # 光与门栅条
 ICON_BAR_W = max(2, int(ICON_SIZE * 0.08))
 ICON_BAR_GAP = int(ICON_SIZE * 0.22)             # 透光槽宽
 ICON_RING_R, ICON_RING_W = int(ICON_SIZE * 0.4), int(ICON_SIZE * 0.12)
-ICON_STORE_R, ICON_STORE_CORE = int(ICON_SIZE * 0.4), int(ICON_SIZE * 0.25)
-
-CLEAR = (0, 0, 0, 0)
+ICON_LATCH_R, ICON_LATCH_CORE = int(ICON_SIZE * 0.4), int(ICON_SIZE * 0.25)
 
 def _surf() -> pygame.Surface:
     """与格子等大的透明底画布（SRCALPHA，便于层层叠加）。"""
@@ -253,26 +263,40 @@ def _slash(surf, color, slash):
         a, b = (ICON_INSET, ICON_INSET), (ICON_SIZE - ICON_INSET, ICON_SIZE - ICON_INSET)
     pygame.draw.line(surf, color, a, b, ICON_LINE_W)
 
+def _plus(surf, color):
+    """格内正十字（十字架）：横竖两条等长粗线，几何中心严格落在方块中心。
+
+    改用两条居中对齐的矩形来画，而不是 pygame 粗线：粗线在“整数坐标 + 偶数线宽”时
+    会朝右、朝下各多占半格，导致十字整体偏右下；矩形能把线段中心精确压回方块中心。
+    """
+    c = ICON_SIZE / 2.0
+    w = ICON_LINE_W
+    span = ICON_SIZE - 2 * ICON_INSET
+    off = round(c - w / 2.0)                       # 线段中心对齐 c，两侧对称各占 w/2
+    pygame.draw.rect(surf, color, (off, ICON_INSET, w, span))     # 竖线
+    pygame.draw.rect(surf, color, (ICON_INSET, off, span, w))     # 横线
+
+
 def _diamond(surf, color, radius):
     """以格心为顶点的菱形（顶点上下左右各 radius）。"""
     cx = cy = ICON_SIZE // 2
     pygame.draw.polygon(surf, color, [(cx, cy - radius), (cx + radius, cy),
                                       (cx, cy + radius), (cx - radius, cy)])
 
-def _make_light_icon(color):
-    """光源：居中主体 + 上沿凸起，凸起所指即 dir=0 时的发射方向。"""
+def _make_laser_icon(color):
+    """激光器：居中主体 + 上沿凸起，凸起所指即 dir=0 时的发射方向。"""
     surf = _surf(); _rect(surf, color, ICON_MAIN); _protrude(surf, color); return surf
 
-def _make_block_icon(color):
-    """方块：实心方块，无开关态，只注册一套色。"""
-    surf = _surf(); _rect(surf, color, ICON_BLOCK); return surf
+def _make_wall_icon(color):
+    """墙：实心方块，无开关态，只注册一套色。"""
+    surf = _surf(); _rect(surf, color, ICON_WALL); return surf
 
 def _make_mirror_icon(color):
-    """折光镜：一条镜面斜线，dir=0 画“/”。"""
+    """反射镜：一条镜面斜线，dir=0 画“/”。"""
     surf = _surf(); _slash(surf, color, True); return surf
 
 def _make_splitter_icon(color):
-    """半透镜：方形外框 + 内部一条镜面斜线，关态时框与线一起变暗灰。"""
+    """分束器：方形外框 + 内部一条镜面斜线，关态时框与线一起变暗灰。"""
     surf = _surf()
     inner = pygame.Rect(ICON_INSET, ICON_INSET, ICON_SIZE - 2 * ICON_INSET,
                         ICON_SIZE - 2 * ICON_INSET)
@@ -280,43 +304,42 @@ def _make_splitter_icon(color):
     _slash(surf, color, True)
     return surf
 
-def _make_collector_icon(color):
-    """聚光镜：空心圆环 + 上沿凸起（环内盖一张透明圆挖空中心）。"""
+def _make_coupler_icon(color):
+    """耦合器：空心圆环 + 上沿凸起（环内盖一张透明圆挖空中心）。"""
     surf = _surf(); c = ICON_SIZE // 2
     pygame.draw.circle(surf, color, (c, c), ICON_RING_R)
     pygame.draw.circle(surf, CLEAR, (c, c), ICON_RING_R - ICON_RING_W)
     _protrude(surf, color)
     return surf
 
-def _make_crystal_icon(color):
-    """光敏晶体：两条竖向栅条夹一条透光槽（dir=0 时透光轴水平）。"""
+def _make_and_gate_icon(color):
+    """光与门 AND Gate：两条竖向栅条夹一条透光槽（dir=0 时透光轴水平）。"""
     surf = _surf(); cx = cy = ICON_SIZE // 2
     top = cy - ICON_BAR_LEN // 2
     for left in (cx - ICON_BAR_GAP // 2 - ICON_BAR_W, cx + ICON_BAR_GAP // 2):
         pygame.draw.rect(surf, color, (left, top, ICON_BAR_W, ICON_BAR_LEN))
     return surf
 
-def _make_store_icon(color):
-    """存储石：空心菱形（大小两菱形叠出边框，掏空用透明色故不留死黑）+ 上沿输出凸起。"""
+def _make_latch_icon(color):
+    """光锁存器：空心菱形（大小两菱形叠出边框，掏空用透明色故不留死黑）+ 上沿输出凸起。"""
     surf = _surf()
-    _diamond(surf, color, ICON_STORE_R)
-    if ICON_STORE_R - ICON_LINE_W > 0:
-        _diamond(surf, CLEAR, ICON_STORE_R - ICON_LINE_W)
+    _diamond(surf, color, ICON_LATCH_R)
+    if ICON_LATCH_R - ICON_LINE_W > 0:
+        _diamond(surf, CLEAR, ICON_LATCH_R - ICON_LINE_W)
     if color == COLOR_ON:
-        _diamond(surf, color, ICON_STORE_CORE)
+        _diamond(surf, color, ICON_LATCH_CORE)
     _protrude(surf, color)
     return surf
 
-# 延时块的图标见 _make_delay_icon：正方形外框 + 叉号，四向对称不带凸起
+# 延迟线的图标见 _make_delay_line_icon：正方形外框 + 正十字（十字架），四向对称不带凸起
 
-def _make_delay_icon(color):
-    """延时块：正方形外框 + 框内叉号。四向对称，四边既是入边也是出边，故不带凸起。"""
+def _make_delay_line_icon(color):
+    """延迟线：正方形外框 + 框内正十字（十字架）。四向对称，四边既是入边也是出边，故不带凸起。"""
     surf = _surf()
     inner = pygame.Rect(ICON_INSET, ICON_INSET, ICON_SIZE - 2 * ICON_INSET,
                         ICON_SIZE - 2 * ICON_INSET)
     pygame.draw.rect(surf, color, inner, ICON_LINE_W)
-    _slash(surf, color, True)
-    _slash(surf, color, False)
+    _plus(surf, color)
     return surf
 
 def _make_off_mark_icon(color):
@@ -326,14 +349,14 @@ def _make_off_mark_icon(color):
 ICONS: Dict[str, Dict[int, pygame.Surface]] = {}
 
 # 六类带开 / 关两态的元件：同一几何配两套色，一次注册八组帧
-for _name, _maker in (('light', _make_light_icon), ('mirror', _make_mirror_icon),
-                      ('splitter', _make_splitter_icon), ('collector', _make_collector_icon),
-                      ('crystal', _make_crystal_icon), ('store', _make_store_icon),
-                      ('delay', _make_delay_icon)):
+for _name, _maker in (('laser', _make_laser_icon), ('mirror', _make_mirror_icon),
+                      ('splitter', _make_splitter_icon), ('coupler', _make_coupler_icon),
+                      ('and_gate', _make_and_gate_icon), ('latch', _make_latch_icon),
+                      ('delay_line', _make_delay_line_icon)):
     for _suffix, _color in (('_on', COLOR_ON), ('_off', COLOR_OFF)):
         ICONS[_name + _suffix] = _icon_frames(_maker(_color))
 
-ICONS['block'] = _icon_frames(_make_block_icon(COLOR_OFF))       # 方块不导光也无开态
+ICONS['wall'] = _icon_frames(_make_wall_icon(COLOR_OFF))       # 墙不导光也无开态
 ICONS['off_mark'] = _icon_frames(_make_off_mark_icon(COLOR_ON))  # 标记不随朝向变化
 
 _SCALED_CACHE: Dict[Tuple[str, int, int], pygame.Surface] = {}   # (icon名, 方向, 屏幕边长) -> 已缩放
@@ -355,23 +378,23 @@ def blit_icon(name: str, direction: int, screen_x: int, screen_y: int,
 
 # ── 05. 方向与坐标工具 ────────────────────────────────────────────
 # 方向统一用 0/1/2/3 表示上/右/下/左，顺时针 +1 即右转，转朝向就是 (dir + step) % 4。
-# 镜子与晶体的“形状语义”一律只看 dir 的奇偶（偶数 = “/” 或水平透光轴，奇数 = 反斜或竖直
+# 反射镜与光与门的“形状语义”一律只看 dir 的奇偶（偶数 = “/” 或水平透光轴，奇数 = 反斜或竖直
 # 透光轴），贴图与光路共用同一个判据，因此看到的形状与算出来的结果不可能不一致。
 REFLECT_ON_SLASH = {0: 1, 1: 0, 2: 3, 3: 2}          # “/” 镜：上<->右、下<->左
 REFLECT_ON_BACKSLASH = {0: 3, 3: 0, 2: 1, 1: 2}      # 反斜镜：上<->左、下<->右
 STEP_BY_DIR = {0: (-1, 0), 1: (0, 1), 2: (1, 0), 3: (0, -1)}
 
 def reflected_direction(direction, mirror_dir):
-    """打到镜子后的新方向：偶数 dir 画“/”、奇数画反斜（贴图与光路共用此判据）。"""
+    """打到反射镜后的新方向：偶数 dir 画“/”、奇数画反斜（贴图与光路共用此判据）。"""
     table = REFLECT_ON_SLASH if mirror_dir % 2 == 0 else REFLECT_ON_BACKSLASH
     return table.get(direction, direction)
 
-def crystal_ports(out_dir):
-    """晶体只看 dir 奇偶，返回（信号光方向, 控制光方向）：偶数 dir 透光轴水平。"""
+def and_gate_ports(out_dir):
+    """光与门只看 dir 奇偶，返回（信号光方向, 控制光方向）：偶数 dir 透光轴水平。"""
     return ((1, 3), (0, 2)) if out_dir % 2 == 0 else ((0, 2), (1, 3))
 
-def store_ports(out_dir):
-    """存储石端口分配：dir 所指的边是输出边，其余三条边为输入边。"""
+def latch_ports(out_dir):
+    """光锁存器端口分配：dir 所指的边是输出边，其余三条边为输入边。"""
     out_dir %= 4
     return out_dir, tuple(d for d in range(4) if d != out_dir)
 
@@ -449,14 +472,14 @@ def clamp_camera():
 # 这一节回答唯一一个难题：给定此刻的世界，光到底走到哪、谁因此亮起来。
 # 结构：外层反复“重算一轮”直到没有任何东西再变化（不动点）；每轮固定做五件事：
 #   1 清动态态（把全图清回“这一刻开始时它应处的态”，口径见 _reset_cell_dynamic）
-#   2 消化射线队列（点亮镜 / 半透、记下被打灭的光源、记下受光的存储石输入边、
-#     记下延时块本刻的注入方向）
-#   3 晶体 AND 判定（信号光与控制光同格都到过才点亮）
-#   4 存储石上升沿（电平集与上一轮基准比对，新增几条就翻几次）
-#   5 光源熄灭锁定（本刻被打灭的灯从发光集合里摘掉，只活到本刻结束）
-# 为什么要多轮：镜 / 半透 / 聚光 / 晶体的状态本身要由光决定，而光又由状态决定，
+#   2 消化射线队列（点亮反射镜 / 分束器、记下被打灭的激光器、记下受光的光锁存器输入边、
+#     记下延迟线本刻的注入方向）
+#   3 光与门 AND 判定（信号光与控制光同格都到过才点亮）
+#   4 光锁存器上升沿（电平集与上一轮基准比对，新增几条就翻几次）
+#   5 激光器熄灭锁定（本刻被打灭的灯从发光集合里摘掉，只活到本刻结束）
+# 为什么要多轮：反射镜 / 分束器 / 耦合器 / 光与门的状态本身要由光决定，而光又由状态决定，
 # 一轮解不出的相互依赖，交给下一轮，直到两轮结论完全相同。
-# 提速：首轮一次全表扫描顺带交出四份播种集合（亮灯 / 置位存石 / 全部存石 / 全部延时块），
+# 提速：首轮一次全表扫描顺带交出四份播种集合（亮灯 / 置位锁存器 / 全部锁存器 / 全部延迟线），
 #       第二轮起只清上一轮真被光碰过的那几格——绝大多数格子没人读它的旧值。
 # 防死循环：ctx.seen 记“从哪格、朝哪个方向进入目标格”的状态。
 
@@ -472,14 +495,14 @@ class TraceCtx:
     """
     segments: List[Segment] = field(default_factory=list)
     pending: Deque[RaySeed] = field(default_factory=deque)
-    hit_lights: Set[Coord] = field(default_factory=set)         # 本轮被击中的光源格
+    hit_lasers: Set[Coord] = field(default_factory=set)         # 本轮被击中的激光器格
     seen: Set[RayState] = field(default_factory=set)            # 本轮已走过的射线状态
-    lit_relay: Set[Coord] = field(default_factory=set)          # 就地“开”的镜 / 半透
-    lit_focus: Set[Coord] = field(default_factory=set)          # 激活的聚光镜
-    touched_crystals: Set[Coord] = field(default_factory=set)   # 记过入账的晶体
-    touched_stores: Set[Coord] = field(default_factory=set)     # 记过入账的存储石
-    touched_delays: Set[Coord] = field(default_factory=set)     # 本轮被光打进来的延时块
-    delay_injects: Dict[Coord, Set[int]] = field(default_factory=dict)  # 本轮各延时块的注入方向
+    lit_relay: Set[Coord] = field(default_factory=set)          # 就地“开”的反射镜 / 分束器
+    lit_focus: Set[Coord] = field(default_factory=set)          # 激活的耦合器
+    touched_and_gates: Set[Coord] = field(default_factory=set)   # 记过入账的光与门
+    touched_latchs: Set[Coord] = field(default_factory=set)     # 记过入账的光锁存器
+    touched_delay_lines: Set[Coord] = field(default_factory=set)     # 本轮被光打进来的延迟线
+    delay_line_injects: Dict[Coord, Set[int]] = field(default_factory=dict)  # 本轮各延迟线的注入方向
     rays: int = 0
     steps: int = 0
     deadline: float = 0.0
@@ -487,92 +510,92 @@ class TraceCtx:
     abort_reason: str = ''
 
 def _reset_cell_dynamic(coord: Coord, data: dict, dark: Optional[Set[Coord]] = None,
-                        crystal_lit: Optional[bool] = None) -> None:
+                        and_gate_lit: Optional[bool] = None) -> None:
     """全文件唯一的动态态清基线口径：把一格清回“这一刻开始时它应处的态”。
 
-    除延时块以外没有任何跨刻记忆，所以基线就是“全图静止”：光源按 is_on、晶体一律不亮、
-    存储石按记忆位、镜 / 半透 / 聚光一律不亮；只有延时块的 out_ready（上一刻末排好的
-    放行方向）要如实带进本刻。dark 与 crystal_lit 只在同一刻的多轮迭代里用：本轮已判定
-    熄灭的灯不再复亮、本轮已判定导通的晶体本轮就当它导通，跨刻一律不带。
-    block 无动态态、未知类型一律不碰。
+    除延迟线以外没有任何跨刻记忆，所以基线就是“全图静止”：激光器按 is_on、光与门一律不亮、
+    光锁存器按记忆位、反射镜 / 分束器 / 耦合器一律不亮；只有延迟线的 out_ready（上一刻末排好的
+    放行方向）要如实带进本刻。dark 与 and_gate_lit 只在同一刻的多轮迭代里用：本轮已判定
+    熄灭的灯不再复亮、本轮已判定导通的光与门本轮就当它导通，跨刻一律不带。
+    wall 无动态态、未知类型一律不碰。
     """
     element_type = data['type']                      # type 键由 TOOL_SPECS 与 _normalize_cell 保证存在
-    if element_type == 'light':
+    if element_type == 'laser':
         data['is_lit'] = bool(data.get('is_on', True)) and not (dark and coord in dark)
-    elif element_type == 'crystal':
+    elif element_type == 'and_gate':
         data['axis_inputs'] = set()                  # 实际到达的信号光（沿透光轴）方向
         data['perp_inputs'] = set()                  # 实际到达的控制光（垂直透光轴）方向
-        data['is_lit'] = False if crystal_lit is None else bool(crystal_lit)
-    elif element_type == 'store':
+        data['is_lit'] = False if and_gate_lit is None else bool(and_gate_lit)
+    elif element_type == 'latch':
         data['is_lit'] = bool(data.get('state'))     # 画面亮暗只反映记忆位
         data['input_dirs'] = set()
-    elif element_type in ('collector', 'mirror', 'splitter'):
+    elif element_type in ('coupler', 'mirror', 'splitter'):
         data['is_lit'] = False                       # 受光即开 / 被照才激活，先当关
-    elif element_type == 'delay':
+    elif element_type == 'delay_line':
         # 全图唯一带跨刻记忆的元件：out_ready 要带进本刻，注入账 inject 只活在 ctx 里，
         # 解完这一刻才落回 data（刻末由 _advance_delay_lines 统一消化）。
         data['is_lit'] = bool(data.get('out_ready'))
 
 
 def _wipe(coord: Coord, dark: Optional[Set[Coord]] = None,
-          crystal_lit: Optional[bool] = None) -> Optional[dict]:
+          and_gate_lit: Optional[bool] = None) -> Optional[dict]:
     """刻内轮间增量清态入口：口径与 _reset_cell_dynamic 完全同一份实现，不再有第二套。"""
     data = grid_data.get(coord)
     if data is None:
         return None
-    _reset_cell_dynamic(coord, data, dark, crystal_lit)
+    _reset_cell_dynamic(coord, data, dark, and_gate_lit)
     return data
 
 
 def _baseline_reset() -> Tuple[List[Coord], Set[Coord], List[Coord], List[Coord]]:
     """按“全图静止”清基线，一次遍历交出四份播种用集合
-    （开着的光源 / 记忆位置 1 的存储石 / 全部存储石 / 全部延时块）。
-    一刻的第 0 轮开头只调这一处；延时块以外没有任何上一刻的结论要继承。
+    （开着的激光器 / 记忆位置 1 的光锁存器 / 全部光锁存器 / 全部延迟线）。
+    一刻的第 0 轮开头只调这一处；延迟线以外没有任何上一刻的结论要继承。
     """
-    light_on: List[Coord] = []
+    laser_on: List[Coord] = []
     emitting_stones: Set[Coord] = set()
-    store_coords: List[Coord] = []
-    delay_coords: List[Coord] = []
+    latch_coords: List[Coord] = []
+    delay_line_coords: List[Coord] = []
     for coord, data in grid_data.items():
         _reset_cell_dynamic(coord, data)             # 口径唯一：与 _wipe 共用，不再有两份实现
         element_type = data['type']
-        if element_type == 'light':
+        if element_type == 'laser':
             if data['is_lit']:
-                light_on.append(coord)
-        elif element_type == 'store':
-            store_coords.append(coord)
+                laser_on.append(coord)
+        elif element_type == 'latch':
+            latch_coords.append(coord)
             if data['is_lit']:
                 emitting_stones.add(coord)
-        elif element_type == 'delay':
-            delay_coords.append(coord)
-    return light_on, emitting_stones, store_coords, delay_coords
+        elif element_type == 'delay_line':
+            delay_line_coords.append(coord)
+    return laser_on, emitting_stones, latch_coords, delay_line_coords
 
 
-def _incremental_reset(prev: TraceCtx, dark: Set[Coord], lit_crystals: Set[Coord]) -> None:
+def _incremental_reset(prev: TraceCtx, dark: Set[Coord], lit_and_gates: Set[Coord]) -> None:
     """第 1 轮起的增量清态：只动上一轮真被光碰过的格子，与 _baseline_reset 等价。
 
-    其余格子这一轮没人读旧值：镜与半透要么这轮被照到（处理器会重置 True），
+    其余格子这一轮没人读旧值：反射镜与分束器要么这轮被照到（处理器会重置 True），
     要么压根没光进来（保持关态就是正确答案）。
     """
     for coord in prev.lit_relay | prev.lit_focus:
         _wipe(coord, dark)
-    for coord in prev.touched_crystals | lit_crystals:
-        _wipe(coord, dark, crystal_lit=coord in lit_crystals)
-    for coord in prev.touched_stores | prev.touched_delays:
+    for coord in prev.touched_and_gates | lit_and_gates:
+        _wipe(coord, dark, and_gate_lit=coord in lit_and_gates)
+    for coord in prev.touched_latchs | prev.touched_delay_lines:
         _wipe(coord, dark)
 
 
-def _seed_rays(emitting_lights: Set[Coord], emitting_stones: Set[Coord],
-               delay_seeds: Optional[List[RaySeed]] = None) -> List[RaySeed]:
+def _seed_rays(emitting_lasers: Set[Coord], emitting_stones: Set[Coord],
+               delay_line_seeds: Optional[List[RaySeed]] = None) -> List[RaySeed]:
     """播种本轮射线：每类“会发光”的元件各出一束。
 
-    存活光源与记忆位置 1 的存储石按其 dir 发一束，刻末到点的延时块按 out_ready 补一束；
-    被光打灭的灯与置 0 的存储石已由外层从集合里筛掉，天然不在这里出现。
+    存活激光器与记忆位置 1 的光锁存器按其 dir 发一束，刻末到点的延迟线按 out_ready 补一束；
+    被光打灭的灯与置 0 的光锁存器已由外层从集合里筛掉，天然不在这里出现。
     全部排序只为同一份世界每轮解出同一份结果（可复现、可对比截图）。
     """
     return [(r, c, grid_data[(r, c)]['dir'])
-            for group in (sorted(emitting_lights), sorted(emitting_stones)) for r, c in group] \
-        + sorted(delay_seeds or [])
+            for group in (sorted(emitting_lasers), sorted(emitting_stones)) for r, c in group] \
+        + sorted(delay_line_seeds or [])
 
 def _abort_trace(ctx: TraceCtx, reason: str) -> None:
     """标记本轮被预算截断并记下原因；只记第一次，之后的预算判定直接短路。"""
@@ -581,7 +604,7 @@ def _abort_trace(ctx: TraceCtx, reason: str) -> None:
         ctx.abort_reason = reason
 
 def _spawn_ray(ctx: TraceCtx, row: int, col: int, direction: int) -> bool:
-    """回灌一条派生射线（半透反射、聚光镜激活都走这里），受单轮射线数预算约束。
+    """回灌一条派生射线（分束器反射、耦合器激活都走这里），受单轮射线数预算约束。
 
     预算耗尽的后果只是“这条新束不再派生”，在途射线照常走完：既保住已经画出的光路，
     也让外层 while 必在有限步内退出（pending 只减不增）。
@@ -595,47 +618,63 @@ def _spawn_ray(ctx: TraceCtx, row: int, col: int, direction: int) -> bool:
     return True
 
 # 七类处理器签名是注册表协议要求的，用不到的形参冠 _ 前缀（等价于就地声明协议位）。
-def _handle_light(ctx, coord, hit_data, _direction):
-    """光源：记入本轮“被打灭”集合；入射段已由派发方登记到灯心，光在此被灯身挡住。"""
-    ctx.hit_lights.add(coord)
+def _handle_laser(ctx, coord, hit_data, _direction):
+    """激光器：记入本轮“被打灭”集合；入射段已由派发方登记到灯心，光在此被灯身挡住。"""
+    ctx.hit_lasers.add(coord)
 
 def _handle_mirror(ctx, coord, hit_data, direction):
-    """折光镜：光一到就地“开”，按镜面朝向改向，从本格格心继续传播。"""
+    """反射镜：光一到就地“开”，按镜面朝向改向，从本格格心继续传播。"""
     hit_data['is_lit'] = True
     ctx.lit_relay.add(coord)
     return coord, reflected_direction(direction, hit_data['dir']), _cell_center(coord[1], coord[0])
 
 def _handle_splitter(ctx, coord, hit_data, direction):
-    """半透镜：本束原方向直行透射，同时把反射方向回灌成一条新射线。"""
+    """分束器：本束原方向直行透射，同时把反射方向回灌成一条新射线。"""
     hit_data['is_lit'] = True
     ctx.lit_relay.add(coord)
     _spawn_ray(ctx, coord[0], coord[1], reflected_direction(direction, hit_data['dir']))
     return coord, direction, _cell_center(coord[1], coord[0])
 
-def _handle_collector(ctx, coord, hit_data, direction):
-    """聚光镜：三入一出——被照到就从输出边另发一束，入射光本身到此为止。
+def _handle_coupler(ctx, coord, hit_data, direction):
+    """耦合器 Coupler：一个双向 1<->N 端口器件，正向汇聚 / 反向 T 型分束二合一。
 
-    两个条件缺一不可：入射方向不能是输出边的逆向（否则自己照自己会无限自激），
-    且本轮尚未激活（否则每束光都另发一束，等于把聚光镜当半透用）。
-    无论激活与否，入射光都停在本格不再透射。
+    正向（汇聚，1~3 入 -> 1 出）：光从任意非逆向输入边进来 -> 从输出边 dir 另发一束，
+    入射光本身被吸收。
+    反向（分束，1 入 -> 2 出）：光从输出边逆向进来 -> 从与输出边相邻的两条输入边
+    （(dir+1)%4 与 (dir+3)%4）各发一束，与输出边正对的那条输入边（(dir+2)%4）仍吸收，
+    即"光从上方打进、从左和右两边走出去"的 T 型分束（吞掉直行分量）。
+
+    两种角色靠同一个 is_lit 互斥锁定：本格本轮一旦激活（无论被哪条边先点亮），
+    另一条边再照进来都视作已处理，绝不再另发——既防正向汇聚时下游回灌自激，
+    也防反向分束在两种角色间来回跳。无论走哪支，入射光都停在本格不再透射。
     """
     output_dir = hit_data['dir']
-    if direction != (output_dir + 2) % 4 and not hit_data['is_lit']:
+    if hit_data['is_lit']:
+        return None
+    if direction == (output_dir + 2) % 4:
+        # 反向分束：光从输出边逆向进 -> 两条相邻输入边各发一束，正对边（直行）被吞。
         hit_data['is_lit'] = True
         ctx.lit_focus.add(coord)
-        _spawn_ray(ctx, coord[0], coord[1], output_dir)
+        _spawn_ray(ctx, coord[0], coord[1], (output_dir + 1) % 4)
+        _spawn_ray(ctx, coord[0], coord[1], (output_dir + 3) % 4)
+        return None
+    # 正向汇聚：非逆向入射 -> 从输出边另发一束。
+    hit_data['is_lit'] = True
+    ctx.lit_focus.add(coord)
+    _spawn_ray(ctx, coord[0], coord[1], output_dir)
+    return None
 
-def _handle_crystal(ctx, coord, hit_data, direction):
-    """光敏晶体 AND 门：信号光 + 控制光两路都到过，本刻才导通。
+def _handle_and_gate(ctx, coord, hit_data, direction):
+    """光与门 AND Gate：信号光 + 控制光两路都到过，本刻才导通。
 
     控制光（垂直透光轴入射）只记进 perp_inputs 账，随后被栅条吸收，绝不改光路；
     信号光（沿透光轴入射）记进 axis_inputs，本格已点亮才透射到轴的另一端，否则被吸收。
-    “两路都到过”这件事由 _collect_lit_crystals 在整轮射线消化完后统一判定，
-    因为单束光走到晶体时另一路可能还没进来，就地判定会漏掉 AND。
-    同刻即时生效：判定完当轮就把 is_lit 置真，所以晶体不带任何门延迟。
+    “两路都到过”这件事由 _collect_lit_and_gates 在整轮射线消化完后统一判定，
+    因为单束光走到光与门时另一路可能还没进来，就地判定会漏掉 AND。
+    同刻即时生效：判定完当轮就把 is_lit 置真，所以光与门不带任何门延迟。
     """
-    axis_dirs, perp_dirs = crystal_ports(hit_data['dir'])
-    ctx.touched_crystals.add(coord)
+    axis_dirs, perp_dirs = and_gate_ports(hit_data['dir'])
+    ctx.touched_and_gates.add(coord)
     if direction in perp_dirs:
         hit_data['perp_inputs'].add(direction)
         return None
@@ -643,38 +682,38 @@ def _handle_crystal(ctx, coord, hit_data, direction):
     if hit_data['is_lit']:
         return coord, direction, _cell_center(coord[1], coord[0])
 
-def _handle_store(ctx, coord, hit_data, direction):
-    """存储石：把“光从哪条边进来”记成该输入边的电平 1，本体的记忆位由外层翻转。
+def _handle_latch(ctx, coord, hit_data, direction):
+    """光锁存器：把“光从哪条边进来”记成该输入边的电平 1，本体的记忆位由外层翻转。
 
     入射边 = 行进方向的反向（光朝下走说明它从上边进来）。入射光一律被菱形本体吸收，
-    只有存石自己会发光（见 _seed_rays）。光打到输出边同样被吸收，但输出端不记电平——
+    只有锁存器自己会发光（见 _seed_rays）。光打到输出边同样被吸收，但输出端不记电平——
     否则它的输出会自激成上升沿，翻转个不停。
     """
-    _, input_dirs = store_ports(hit_data['dir'])
+    _, input_dirs = latch_ports(hit_data['dir'])
     entry_edge = (direction + 2) % 4
     if entry_edge in input_dirs:
         hit_data['input_dirs'].add(entry_edge)
-        ctx.touched_stores.add(coord)
+        ctx.touched_latchs.add(coord)
 
-def _handle_delay(ctx, coord, hit_data, direction):
-    """延时块：全图唯一真正跟“刻”有关的元件。
+def _handle_delay_line(ctx, coord, hit_data, direction):
+    """延迟线：全图唯一真正跟“刻”有关的元件。
 
     光一律被本体吸收，只在账上记一笔“这一轮从 direction 进来过”，放不放行由刻末
-    _advance_delay_lines 按延迟线决定，本刻绝不派生射线。其余元件的处理器都不碰这里。
+    _advance_delay_lines 按延迟队列决定，本刻绝不派生射线。其余元件的处理器都不碰这里。
     """
-    ctx.delay_injects.setdefault(coord, set()).add(direction)
+    ctx.delay_line_injects.setdefault(coord, set()).add(direction)
     hit_data['is_lit'] = True
-    ctx.touched_delays.add(coord)
+    ctx.touched_delay_lines.add(coord)
 
 
-def _handle_block(ctx, coord, hit_data, direction):
-    """方块：入射段登记完即止，既不透射也不派生新射线（兼作未登记类型的兜底）。"""
+def _handle_wall(ctx, coord, hit_data, direction):
+    """墙：入射段登记完即止，既不透射也不派生新射线（兼作未登记类型的兜底）。"""
 
 # 注册表：返回 None 表示光在此终止，返回 (格子, 新方向, 新起点) 表示继续传播
 ELEMENT_HANDLERS: Dict[str, Callable[..., HandlerResult]] = {
-    'block': _handle_block, 'light': _handle_light, 'mirror': _handle_mirror,
-    'splitter': _handle_splitter, 'collector': _handle_collector,
-    'crystal': _handle_crystal, 'store': _handle_store, 'delay': _handle_delay,
+    'wall': _handle_wall, 'laser': _handle_laser, 'mirror': _handle_mirror,
+    'splitter': _handle_splitter, 'coupler': _handle_coupler,
+    'and_gate': _handle_and_gate, 'latch': _handle_latch, 'delay_line': _handle_delay_line,
 }
 
 def _trace_one_ray(ctx: TraceCtx) -> None:
@@ -682,7 +721,7 @@ def _trace_one_ray(ctx: TraceCtx) -> None:
 
     去重与截断的口径：
       seen 记“从哪格、朝哪个方向进入目标格”。同一轮里重复该状态，后面必然是重复几何
-      且零新增记账（镜与半透只是改配色、聚光镜一次性激活、晶体点亮要到轮末才生效），
+      且零新增记账（反射镜与分束器只是改配色、耦合器一次性激活、光与门点亮要到轮末才生效），
       所以掐掉它既防住镜面回路的无限循环，又保证不丢任何一条有效光路。
       出界时把终点钉在世界边界上（_ray_end_at_world_edge），画面不会出现断头光。
       走满 MAX_RAY_STEPS 只就地截断，绝不从当前格补画一条到边界的假线——
@@ -717,7 +756,7 @@ def _trace_one_ray(ctx: TraceCtx) -> None:
             cur_row, cur_col = next_row, next_col
             continue
         _add_segment(segments, start, _cell_center(next_col, next_row))  # 入射段全类型通用
-        handler = ELEMENT_HANDLERS.get(_etype(hit_data), _handle_block)
+        handler = ELEMENT_HANDLERS.get(_etype(hit_data), _handle_wall)
         result = handler(ctx, (next_row, next_col), hit_data, direction)
         if result is None:
             return
@@ -726,20 +765,20 @@ def _trace_one_ray(ctx: TraceCtx) -> None:
     # 走满单束上限只剩病态布局这一种解释（正常折线的状态数已被去重限制在 格数x4 内）
     _abort_trace(ctx, 'ray steps>%d' % MAX_RAY_STEPS)
 
-def _collect_lit_crystals(ctx: TraceCtx) -> Set[Coord]:
+def _collect_lit_and_gates(ctx: TraceCtx) -> Set[Coord]:
     """AND 判定：同一格内信号光与控制光都到过才点亮。
 
-    只遍历本轮真被光碰过的晶体（touched_crystals），没光照到的晶体连查都不用查；
+    只遍历本轮真被光碰过的光与门（touched_and_gates），没光照到的光与门连查都不用查；
     判出的集合既用于本轮就地生效（置 is_lit），也用于外层比对是否收敛。
     """
     lit: Set[Coord] = set()
-    for coord in ctx.touched_crystals:
+    for coord in ctx.touched_and_gates:
         data = grid_data.get(coord)
         if data is not None and data.get('axis_inputs') and data.get('perp_inputs'):
             lit.add(coord)
     return lit
 
-def _advance_store_states(candidates: List[Coord], armed_stores: Set[Coord]
+def _advance_latch_states(candidates: List[Coord], armed_latchs: Set[Coord]
                           ) -> Tuple[Set[Coord], Set[Coord]]:
     """比对本轮与上一轮的输入边电平，按上升沿个数翻转输出状态（奇换偶不换）。
 
@@ -747,17 +786,17 @@ def _advance_store_states(candidates: List[Coord], armed_stores: Set[Coord]
       in_levels 为 None 表示“刚放置 / 刚旋转 / 刚复位”，此时只记基准不补算上升沿，
         否则摆下去那一瞬间就会白翻一次（存档里 null 与 -1 也一律还原成 None）。
       翻转按“新出现的边数”取模 2：三条输入边同轮一起亮，本该翻一次而不是三次。
-      candidates 从第二轮起要并上“上一轮电平非空”的那批（armed_stores），否则光撤走之后
-        电平永远落不回空集，下次再受光就不算上升沿了——存石会“变迟钝”。
-    返回值同时交回新的发光集合（armed）与被翻翻转的格子，外层据此增删 emitting_stores。
+      candidates 从第二轮起要并上“上一轮电平非空”的那批（armed_latchs），否则光撤走之后
+        电平永远落不回空集，下次再受光就不算上升沿了——锁存器会“变迟钝”。
+    返回值同时交回新的发光集合（armed）与被翻翻转的格子，外层据此增删 emitting_latchs。
     """
     flipped: Set[Coord] = set()
-    armed: Set[Coord] = set(armed_stores)
+    armed: Set[Coord] = set(armed_latchs)
     for coord in candidates:
         data = grid_data.get(coord)
         if data is None:
             continue
-        _, input_dirs = store_ports(data['dir'])
+        _, input_dirs = latch_ports(data['dir'])
         levels = frozenset(d for d in data.get('input_dirs') or () if d in input_dirs)
         previous = data['in_levels']
         if previous is not None:
@@ -773,20 +812,20 @@ def _advance_store_states(candidates: List[Coord], armed_stores: Set[Coord]
             armed.discard(coord)
     return flipped, armed
 
-def solve_tick(delay_seeds: List[RaySeed]) -> Tuple[List[Segment], List[Coord], bool]:
-    """解一次光路，并把光路、晶体导通、存储石记忆位、光源熄灭收敛到一致（幂等）。
+def solve_tick(delay_line_seeds: List[RaySeed]) -> Tuple[List[Segment], List[Coord], bool]:
+    """解一次光路，并把光路、光与门导通、光锁存器记忆位、激光器熄灭收敛到一致（幂等）。
 
-    这一层完全没有“时序”概念：一轮五件事（清动态态 -> 消化射线 -> 晶体 AND -> 存储石
-    上升沿 -> 光源熄灭锁定），反复迭代到不动点。于是除延时块以外的元件都是零刻延迟的
-    组合逻辑——摆下去当场就是终态，晶体 AND 门同刻即亮即导通，不需要任何跨刻记忆。
-    返回（光段, 全部延时块坐标, 是否被预算截断）；trace_note 就地写好，HUD 直接显示。
+    这一层完全没有“时序”概念：一轮五件事（清动态态 -> 消化射线 -> 光与门 AND -> 光锁存器
+    上升沿 -> 激光器熄灭锁定），反复迭代到不动点。于是除延迟线以外的元件都是零刻延迟的
+    组合逻辑——摆下去当场就是终态，光与门 AND 门同刻即亮即导通，不需要任何跨刻记忆。
+    返回（光段, 全部延迟线坐标, 是否被预算截断）；trace_note 就地写好，HUD 直接显示。
     """
     global trace_note, timeline_present
-    light_on, emitting_stores, store_coords, delay_coords = _baseline_reset()
-    timeline_present = bool(delay_coords)
-    emitting: Set[Coord] = set(light_on)
-    lit_crystals: Set[Coord] = set()
-    armed_stores: Set[Coord] = set()
+    laser_on, emitting_latchs, latch_coords, delay_line_coords = _baseline_reset()
+    timeline_present = bool(delay_line_coords)
+    emitting: Set[Coord] = set(laser_on)
+    lit_and_gates: Set[Coord] = set()
+    armed_latchs: Set[Coord] = set()
     dark: Set[Coord] = set()                          # 本刻内被打灭的灯（只活到本刻结束）
     ctx = TraceCtx()                                  # 循环外先建好，MAX_LIGHT_ROUNDS=0 也不引用未绑定
     used_rounds = 0
@@ -796,11 +835,11 @@ def solve_tick(delay_seeds: List[RaySeed]) -> Tuple[List[Segment], List[Coord], 
         used_rounds = round_index + 1
         # 步 1 清动态态：第 0 轮按“全图静止”清基线，之后只清上一轮真被光碰过的格子
         if round_index:                               # 此刻 ctx 还是上一轮那本账，照它增量清理
-            _incremental_reset(ctx, dark, lit_crystals)
+            _incremental_reset(ctx, dark, lit_and_gates)
         ctx = TraceCtx()                              # 一轮一份新账，上一轮光段不带过来
         segments = ctx.segments
-        # 步 2 消化射线：发光源 = 存活光源 + 记忆位置 1 的存石 + 刻末到点的延时块
-        ctx.pending = deque(_seed_rays(emitting, emitting_stores, delay_seeds))
+        # 步 2 消化射线：发激光器 = 存活激光器 + 记忆位置 1 的锁存器 + 刻末到点的延迟线
+        ctx.pending = deque(_seed_rays(emitting, emitting_latchs, delay_line_seeds))
         ctx.deadline = time.perf_counter() + TRACE_TIME_LIMIT_S
         while ctx.pending and not ctx.aborted:
             _trace_one_ray(ctx)                        # 每次推进一束，派生束就地回灌进同一本账
@@ -808,28 +847,28 @@ def solve_tick(delay_seeds: List[RaySeed]) -> Tuple[List[Segment], List[Coord], 
             trace_note = 'TRUNC r%d %s (rays %d steps %d segs %d)' % (
                 used_rounds, ctx.abort_reason, ctx.rays, ctx.steps, len(segments))
             break
-        # 步 3 晶体 AND：两路到齐当轮就导通，零刻延迟（不需要跨刻记忆）
-        new_lit = _collect_lit_crystals(ctx)
+        # 步 3 光与门 AND：两路到齐当轮就导通，零刻延迟（不需要跨刻记忆）
+        new_lit = _collect_lit_and_gates(ctx)
         for coord in new_lit:
             grid_data[coord]['is_lit'] = True
-        # 步 4 存储石上升沿：电平集与上一轮基准比对，翻出来的结果立刻影响发光集合
-        flipped, armed_stores = _advance_store_states(
-            store_coords if round_index == 0 else list(ctx.touched_stores | armed_stores),
-            armed_stores)
-        # 步 5 光源熄灭锁定：只统计“此刻还活着”的灯被打灭了几盏（dark 只活到本刻结束）
-        newly_dark = ctx.hit_lights & emitting
+        # 步 4 光锁存器上升沿：电平集与上一轮基准比对，翻出来的结果立刻影响发光集合
+        flipped, armed_latchs = _advance_latch_states(
+            latch_coords if round_index == 0 else list(ctx.touched_latchs | armed_latchs),
+            armed_latchs)
+        # 步 5 激光器熄灭锁定：只统计“此刻还活着”的灯被打灭了几盏（dark 只活到本刻结束）
+        newly_dark = ctx.hit_lasers & emitting
         dark |= newly_dark
-        # 不动点判据：本刻三件会互相推动的事（灯灭、晶体导通、存石翻转）都没再变化
-        if not newly_dark and new_lit == lit_crystals and not flipped:
+        # 不动点判据：本刻三件会互相推动的事（灯灭、光与门导通、锁存器翻转）都没再变化
+        if not newly_dark and new_lit == lit_and_gates and not flipped:
             converged = True
             break
         emitting -= newly_dark
-        lit_crystals = new_lit
-        for coord in flipped:                         # 存储石发光集合跟着记忆位增量更新
+        lit_and_gates = new_lit
+        for coord in flipped:                         # 光锁存器发光集合跟着记忆位增量更新
             if grid_data[coord]['state']:
-                emitting_stores.add(coord)
+                emitting_latchs.add(coord)
             else:
-                emitting_stores.discard(coord)
+                emitting_latchs.discard(coord)
     if not ctx.aborted:                # 跑满上限仍没收敛时如实报 MAXR，不冒充 ok
         trace_note = '%s r%d (rays %d steps %d segs %d)' % (
             'ok' if converged else 'MAXR', used_rounds, ctx.rays, ctx.steps, len(segments))
@@ -840,38 +879,38 @@ def solve_tick(delay_seeds: List[RaySeed]) -> Tuple[List[Segment], List[Coord], 
             data['is_lit'] = False
     # 收尾 B：把注入账从上下文落回元件——只留收敛那一轮的结论，
     # 中间轮里被后续光改出来的临时账一律不作数（刻末 _advance_delay_lines 按它推线）
-    for coord, dirs in ctx.delay_injects.items():
+    for coord, dirs in ctx.delay_line_injects.items():
         data = grid_data.get(coord)
-        if data is not None and _etype(data) == 'delay':
+        if data is not None and _etype(data) == 'delay_line':
             data['inject'] = set(dirs)
             data['is_lit'] = True
-    return segments, delay_coords, ctx.aborted
+    return segments, delay_line_coords, ctx.aborted
 
 
-def _delay_ticks(data: dict) -> int:
-    """取延时刻度并夹进合法区间：坏档 / 手改的乱值一律退回默认，绝不让 len(pipe) 比较崩掉。"""
+def _delay_line_ticks(data: dict) -> int:
+    """取延迟刻度并夹进合法区间：坏档 / 手改的乱值一律退回默认，绝不让 len(pipe) 比较崩掉。"""
     try:
-        ticks = int(data.get('delay', DELAY_DEFAULT_TICKS))
+        ticks = int(data.get('ticks', DELAY_LINE_DEFAULT_TICKS))
     except (TypeError, ValueError):
-        ticks = DELAY_DEFAULT_TICKS
-    return max(DELAY_MIN_TICKS, min(ticks, DELAY_MAX_TICKS))
+        ticks = DELAY_LINE_DEFAULT_TICKS
+    return max(DELAY_LINE_MIN_TICKS, min(ticks, DELAY_LINE_MAX_TICKS))
 
 def _advance_delay_lines(coords: List[Coord]) -> int:
-    """刻末统一推进所有延迟线，返回本刻结束时正在放行的延时块数。
+    """刻末统一推进所有延迟队列，返回本刻结束时正在放行的延迟线数。
 
     口径：每一刻先收下本刻注入账（没有光也要记一个空位，否则“没光的刻”不计时，
-    延时就成了“光走过的刻数”而不是真实刻数），线满 n 位才出队一位作为放行方向，
-    于是 t 刻注入、第 t+n 刻放出，正好是“等 n 刻”。n 只由延时刻度决定，换算成秒
+    延迟就成了“光走过的刻数”而不是真实刻数），线满 n 位才出队一位作为放行方向，
+    于是 t 刻注入、第 t+n 刻放出，正好是“等 n 刻”。n 只由延迟刻度决定，换算成秒
     就是 n x TICK_INTERVAL_S。必须在整刻解完之后统一做，不能放在处理器里就地推进，
     否则同一刻被碰两次就会多吃掉一格线位。
     """
-    global delay_ready
+    global delay_line_ready
     ready = 0
     for coord in coords:
         data = grid_data.get(coord)
-        if data is None or _etype(data) != 'delay':   # 这一轮之间被擦掉的块直接跳过
+        if data is None or _etype(data) != 'delay_line':   # 这一轮之间被擦掉的块直接跳过
             continue
-        ticks = _delay_ticks(data)                    # 刻度先夹进合法区间，坏值不崩比较
+        ticks = _delay_line_ticks(data)                    # 刻度先夹进合法区间，坏值不崩比较
         inject = tuple(sorted(data.get('inject') or ()))
         data['inject'] = set()                        # 注入账只活到本刻结束
         pipe: List[Tuple[int, ...]] = data.setdefault('pipe', [])
@@ -883,29 +922,29 @@ def _advance_delay_lines(coords: List[Coord]) -> int:
         if data['out_ready']:
             data['is_lit'] = True                     # 只有正在往外放光才亮
             ready += 1
-    delay_ready = ready
+    delay_line_ready = ready
     return ready
 
 
-def _delay_coords() -> List[Coord]:
-    """当前世界里全部延时块坐标（延迟线与复位都要按这张表走）。"""
-    return [coord for coord, data in grid_data.items() if _etype(data) == 'delay']
+def _delay_line_coords() -> List[Coord]:
+    """当前世界里全部延迟线坐标（延迟队列与复位都要按这张表走）。"""
+    return [coord for coord, data in grid_data.items() if _etype(data) == 'delay_line']
 
 
 def reset_timeline(reason: str = '') -> None:
-    """把时序倒回第 0 刻：刻号归零 + 每条延迟线清空，别的东西没有跨刻记忆、无需清理。
+    """把时序倒回第 0 刻：刻号归零 + 每条延迟队列清空，别的东西没有跨刻记忆、无需清理。
 
-    放置 / 擦除 / 旋转 / 改刻度 / 撤销重做 / 读档 / 粘贴 / R 键都走这里。旧布局攒了
-    一半的延迟线对新布局没有意义（延时装满信号再撤掉，复原后会凭空往外吐光），
+    放置 / 擦除 / 旋转 / 改刻度 / 撤销重做 / 读档 / 粘贴都走这里。旧布局攒了
+    一半的延迟队列对新布局没有意义（延迟装满信号再撤掉，复原后会凭空往外吐光），
     所以一律从干净的起点重算。
     """
     global tick_index, tick_note, timeline_present
     tick_index = 0
     if not timeline_present:
         tick_note = ('reset: %s' % reason) if reason else 'timeline reset'
-        return                                        # 没有延时块：不必为 15 万元件白扫一遍
+        return                                        # 没有延迟线：不必为 15 万元件白扫一遍
     for data in grid_data.values():
-        if _etype(data) == 'delay':
+        if _etype(data) == 'delay_line':
             data['pipe'] = []
             data['out_ready'] = ()
             data['inject'] = set()
@@ -913,31 +952,24 @@ def reset_timeline(reason: str = '') -> None:
     tick_note = ('reset: %s' % reason) if reason else 'timeline reset'
 
 
-def manual_reset_timeline() -> None:
-    """R 键：显式复位时序（刻号归零 + 清空全部延迟线），想从头看一遍信号走向时用。"""
-    global grid_changed, minimap_dirty
-    reset_timeline('manual R')
-    _note('timeline reset: tick 0, all delay lines cleared')
-    grid_changed = minimap_dirty = True
-
 
 def step_tick() -> List[Segment]:
-    """推进一刻：解一次光路（除延时块外全部当场收敛）+ 推一次延迟线 + 刻号 +1。
+    """推进一刻：解一次光路（除延迟线外全部当场收敛）+ 推一次延迟队列 + 刻号 +1。
 
-    全文件“时序”只有这一步，而且只有延时块真的跨了过去：其它元件在这一步里已经是
-    终态，刻与刻之间唯一的差别就是各条延迟线往前挪了一格。
+    全文件“时序”只有这一步，而且只有延迟线真的跨了过去：其它元件在这一步里已经是
+    终态，刻与刻之间唯一的差别就是各条延迟队列往前挪了一格。
     """
     global tick_index, tick_note
-    coords = _delay_coords()
-    delay_seeds = [(row, col, d) for (row, col) in sorted(coords)
+    coords = _delay_line_coords()
+    delay_line_seeds = [(row, col, d) for (row, col) in sorted(coords)
                    for d in (grid_data[(row, col)].get('out_ready') or ())]
-    segments, _, aborted = solve_tick(delay_seeds)
+    segments, _, aborted = solve_tick(delay_line_seeds)
     if aborted:                                       # 被预算截断的这一刻不算数：不推线、刻号不动
         tick_note = 'aborted'
         return segments
     _advance_delay_lines(coords)
     tick_note = ''
-    tick_index += 1
+    tick_index = (tick_index + 1) % TICK_DISPLAY_WRAP   # 刻号到阈值归零，HUD 数字循环显示
     return segments
 
 
@@ -954,19 +986,19 @@ def _hover_surface(cell_size: int) -> pygame.Surface:
     surf = _HOVER_CACHE.get(cell_size)
     if surf is None:
         surf = pygame.Surface((cell_size, cell_size), pygame.SRCALPHA)
-        surf.fill(COLOR_HOVER)
+        surf.fill(_tint(COLOR_ON, 45))
         _HOVER_CACHE[cell_size] = surf
     return surf
 
 def _draw_element(data: dict, screen_x: int, screen_y: int, cell_size: int) -> None:
-    """贴本体 icon（按 is_lit 取 on/off 套色，方块单态）；手动关着的光源再叠斜十字标记。
+    """贴本体 icon（按 is_lit 取 on/off 套色，墙单态）；手动关着的激光器再叠斜十字标记。
 
     is_lit 已由 _baseline_reset / solve_tick 保证等于本刻真实生效态，所以这里不需要
     任何“被光打灭但 is_on 仍为真”的特判——渲染层替状态模型打补丁正是 #2 的成因。
     手动关（is_on=False）叠斜十字，被光打灭只变暗灰，两种“不亮”仍可区分。
     """
     element_type = _etype(data)
-    name = ('block' if element_type == 'block'
+    name = ('wall' if element_type == 'wall'
             else '%s_%s' % (element_type, 'on' if data.get('is_lit', False) else 'off'))
     blit_icon(name, data['dir'], screen_x, screen_y, cell_size)
     if element_type in SWITCHABLE_TYPES and not data.get('is_on', True):
@@ -1015,11 +1047,13 @@ def draw_scene(ray_segments: List[Segment]) -> None:
     screen.fill(COLOR_BG)
     mouse_pos = pygame.mouse.get_pos()
     # 光标压在缩略图上时不取格高亮，避免“看着亮一格、点的却是地图”；None 当哨兵（-1 也是合法格）
-    hover_row, hover_col = (None, None) if minimap_hit(mouse_pos) else screen_to_grid(*mouse_pos)
+    _ui_hover = minimap_hit(mouse_pos) or hotbar_index_at(mouse_pos) is not None
+    hover_row, hover_col = (None, None) if _ui_hover else screen_to_grid(*mouse_pos)
     _draw_cells_in_view(hover_row, hover_col)
     _draw_rays(ray_segments)
     draw_hud()
     draw_minimap(ray_segments)
+    draw_hotbar()
 
 # ── 08. 小地图（视口局部地图，恒为主画面的 0.05 倍）────────────────
 # 图幅正中心始终是视口中心，它不是整张世界的缩略图，故元件能按所在格真实相对大小
@@ -1027,13 +1061,7 @@ def draw_scene(ray_segments: List[Segment]) -> None:
 MM_SIZE, MM_MARGIN = 180, 10
 MM_RELATIVE_SCALE = 0.05             # 缩略图相对主画面的倍率
 MM_SCAN_CELL_LIMIT = 40000           # 逐格查表的格数上限，超过就退回遍历元件表筛范围
-MM_BG = (0, 0, 0, 140)
-MM_DOT_LIT = COLOR_ON
-MM_DOT_IDLE = (175, 175, 175)        # 未受光的元件与方块
-MM_VIEW = (255, 255, 255)            # 视口框与中心十字
-MM_CROSS = 6
-MM_BORDER = COLOR_GRID
-MM_EDGE = (168, 132, 66)             # 世界边界线（靠近世界尽头时才出现在图上）
+MM_CROSS = 6                         # 中心十字臂长；其余颜色直接复用全局色板（见 _tint）
 MM_FONT = pygame.font.SysFont('consolas,menlo,monospace', 12)
 
 minimap_visible = True
@@ -1053,7 +1081,7 @@ def _mm_rect():
 
 def _mm_center():
     """当前视口中心的世界坐标，同时也是图幅正中心。"""
-    return (camera_x + (WINDOW_WIDTH / zoom) / 2.0, camera_y + (WINDOW_HEIGHT / zoom) / 2.0)
+    return camera_x + (WINDOW_WIDTH / zoom) / 2.0, camera_y + (WINDOW_HEIGHT / zoom) / 2.0
 
 def _mm_key():
     """缓存键：视口中心（取整）与倍率，任一变化说明局部内容已经换了一批。"""
@@ -1111,21 +1139,21 @@ def build_minimap(ray_segments) -> None:
     center_x, center_y = _mm_center()
     half = (MM_SIZE / 2.0) / scale                    # 图幅半边长对应的世界像素范围
     surf = pygame.Surface((MM_SIZE, MM_SIZE), pygame.SRCALPHA)
-    surf.fill(MM_BG)
+    surf.fill(_tint(COLOR_BG, 140))
     for world_x in (WORLD_MIN_PX, WORLD_MAX_PX):      # 世界边界：平时在图外看不见
         map_x, _ = _mm_to_map(world_x, center_y)
         if -1 <= map_x <= MM_SIZE:
-            pygame.draw.line(surf, MM_EDGE, (int(map_x), 0), (int(map_x), MM_SIZE - 1), 1)
+            pygame.draw.line(surf, COLOR_GRID, (int(map_x), 0), (int(map_x), MM_SIZE - 1), 1)
     for world_y in (WORLD_MIN_PY, WORLD_MAX_PY):
         _, map_y = _mm_to_map(center_x, world_y)
         if -1 <= map_y <= MM_SIZE:
-            pygame.draw.line(surf, MM_EDGE, (0, int(map_y)), (MM_SIZE - 1, int(map_y)), 1)
+            pygame.draw.line(surf, COLOR_GRID, (0, int(map_y)), (MM_SIZE - 1, int(map_y)), 1)
     ray_width = max(1, int(round(BASE_CELL_SIZE * 0.1 * zoom * MM_RELATIVE_SCALE)))
     for (x1, y1), (x2, y2) in ray_segments:
         clipped = _mm_clip_segment((x1, y1), (x2, y2))
         if clipped:
             (mx1, my1), (mx2, my2) = clipped
-            pygame.draw.line(surf, MM_DOT_LIT, (int(mx1), int(my1)), (int(mx2), int(my2)),
+            pygame.draw.line(surf, COLOR_ON, (int(mx1), int(my1)), (int(mx2), int(my2)),
                              ray_width)
     # 元件点：先框定图幅覆盖到的行列范围，再按“范围大小 vs 元件数”择优取源
     dot = max(2, int(round(BASE_CELL_SIZE * scale)))
@@ -1139,9 +1167,9 @@ def build_minimap(ray_segments) -> None:
         cell_x, cell_y = _cell_center(col, row)
         map_x, map_y = _mm_point(cell_x, cell_y)
         working = data.get('is_lit', False) or data.get('is_on', False)
-        pygame.draw.rect(surf, MM_DOT_LIT if working else MM_DOT_IDLE,
+        pygame.draw.rect(surf, COLOR_ON if working else COLOR_OFF,
                          (map_x - dot // 2, map_y - dot // 2, dot, dot))
-    pygame.draw.rect(surf, MM_BORDER, surf.get_rect(), 1)
+    pygame.draw.rect(surf, COLOR_GRID, surf.get_rect(), 1)
     _minimap_surface = surf
     minimap_dirty = False
     _minimap_key = _mm_key()
@@ -1156,13 +1184,13 @@ def _text(font, text, cache, limit, bg_pad=None):
     """
     pair = cache.get(text)
     if pair is None:
-        surf = font.render(text, True, COLOR_HUD_TEXT)
+        surf = font.render(text, True, COLOR_ON)
         if bg_pad is None:
             value = surf
         else:
             bg = pygame.Surface((surf.get_width() + bg_pad[0], surf.get_height() + bg_pad[1]),
                                 pygame.SRCALPHA)
-            bg.fill(COLOR_HUD_BG)
+            bg.fill(_tint(COLOR_BG, 80))
             value = (surf, bg)
         if len(cache) >= limit:
             cache.clear()                             # 文案基本是固定几条，超量整表重来
@@ -1190,11 +1218,11 @@ def draw_minimap(ray_segments) -> None:
     view_w = max(2, min(MM_SIZE - 2, int((WINDOW_WIDTH / zoom) * scale)))
     view_h = max(2, min(MM_SIZE - 2, int((WINDOW_HEIGHT / zoom) * scale)))
     center_x, center_y = rect.center
-    pygame.draw.rect(screen, MM_VIEW,
+    pygame.draw.rect(screen, COLOR_ON,
                      pygame.Rect(center_x - view_w // 2, center_y - view_h // 2, view_w, view_h), 1)
-    pygame.draw.line(screen, MM_VIEW, (center_x - MM_CROSS, center_y),
+    pygame.draw.line(screen, COLOR_ON, (center_x - MM_CROSS, center_y),
                      (center_x + MM_CROSS, center_y), 1)
-    pygame.draw.line(screen, MM_VIEW, (center_x, center_y - MM_CROSS),
+    pygame.draw.line(screen, COLOR_ON, (center_x, center_y - MM_CROSS),
                      (center_x, center_y + MM_CROSS), 1)
     label = _text(MM_FONT, 'MAP x%.2f' % MM_RELATIVE_SCALE, _MM_LABEL_CACHE, 32)
     screen.blit(label, (rect.x + 3, rect.bottom - label.get_height() - 2))
@@ -1225,24 +1253,73 @@ def toggle_minimap() -> None:
     minimap_visible = not minimap_visible
     minimap_dirty = True
 
+# ── 08b. 底部快捷栏（Minecraft 式：元件图标 + 选中蓝框 / 未选灰框，点击即选中；选中名大字号居中显示在图标上方）──
+# 与 HUD 文本互斥：元件"当前是什么、有哪些可切"改由此栏可视化承载，故 HUD 删去了工具两行。
+# 纯绘制层 + 命中测试，不改任何状态模型；选中直接写 current_tool，与数字键 0-7 同一口径。
+HOTBAR_CELL = 48                             # 单个格子的正方形边长（== ICON_SIZE，图标免缩放）
+HOTBAR_GAP = 6                               # 格子水平间距
+HOTBAR_BOTTOM_PAD = 10                       # 栏底到窗口下沿留白（名称已移到图标上方，底部不再占位）
+HOTBAR_FONT = pygame.font.SysFont('consolas,menlo,monospace', 11)
+HOTBAR_NAME_FONT = pygame.font.SysFont('consolas,menlo,monospace', 24)  # 选中元件名的大号字
+
+def _hotbar_rects() -> List[pygame.Rect]:
+    """按当前窗口宽算出 n 个格子矩形：整体水平居中、贴窗口底部。"""
+    n = len(TOOL_TYPES)
+    step = HOTBAR_CELL + HOTBAR_GAP
+    total = n * step - HOTBAR_GAP
+    win_w, win_h = screen.get_size()
+    x0 = max(4, (win_w - total) // 2)
+    y0 = win_h - HOTBAR_CELL - HOTBAR_BOTTOM_PAD
+    return [pygame.Rect(x0 + i * step, y0, HOTBAR_CELL, HOTBAR_CELL) for i in range(n)]
+
+def hotbar_index_at(pos) -> Optional[int]:
+    """屏幕坐标命中的快捷栏下标，未命中返回 None。"""
+    for i, rect in enumerate(_hotbar_rects()):
+        if rect.collidepoint(pos):
+            return i
+    return None
+
+def _hotbar_icon_name(tool_type: str) -> str:
+    """快捷栏图标取该元件的"亮态"贴图；墙无开态，直接取其单一贴图名。"""
+    return tool_type if tool_type == 'wall' else tool_type + '_on'
+
+def draw_hotbar() -> None:
+    """画底部快捷栏：逐格 半透明底 + 图标 + 左上角序号；选中蓝粗框、未选灰细框。
+    不再逐格显示元件名——把当前选中元件的名字用大号字居中画在整排图标的正上方。"""
+    rects = _hotbar_rects()
+    for i, rect in enumerate(rects):
+        selected = (i == current_tool)
+        bg = pygame.Surface((rect.w, rect.h), pygame.SRCALPHA)
+        bg.fill(_tint(COLOR_BG, 130))
+        screen.blit(bg, rect.topleft)
+        side = HOTBAR_CELL - 8                 # 图标四周留 4px 内边距
+        sx = rect.x + (rect.w - side) // 2
+        sy = rect.y + (rect.h - side) // 2
+        blit_icon(_hotbar_icon_name(TOOL_TYPES[i]), 0, sx, sy, side)
+        pygame.draw.rect(screen, COLOR_ON if selected else COLOR_OFF,
+                         rect, 3 if selected else 1)
+        num = HOTBAR_FONT.render(str(i), True, COLOR_ON if selected else COLOR_OFF)
+        screen.blit(num, (rect.x + 3, rect.y + 2))
+    # 选中元件名：大号字，水平居中于整排图标正上方（字体放大，靠整排宽度腾出空间）
+    label = HOTBAR_NAME_FONT.render(TOOL_DISPLAY[current_tool], True, COLOR_ON)
+    lx = (rects[0].x + rects[-1].right) // 2 - label.get_width() // 2
+    ly = rects[0].top - label.get_height() - 4
+    screen.blit(label, (lx, ly))
+
 # ── 09. HUD（ASCII 文本，规避中文字体缺失导致的渲染异常）───────────
 # HUD 是纯展示层：只读全局状态，不参与取格，也不影响任何求解结果。
 # 文案一律纯 ASCII——用户机器上未必有中文字体，缺字时 pygame 会画出方框或空白，
 # 提示行一旦不可读就等于没有提示（这是当初放弃中文的唯一原因，不是功能限制）。
-# HUD_LINES 的行数固定为 10，索引即约定：0 当前工具 / 1 工具条 / 2-6 键位说明 /
-# 7 时序行 / 8 槽位与栈深 / 9 一次性提示与光路收尾；改行序要同步改 draw_hud 的写入索引。
+# HUD_LINES 的行数固定为 8（元件信息由底部快捷栏承载，工具/工具条两行已删），索引即约定：
+# 0-4 键位说明 / 5 时序行 / 6 槽位与栈深 / 7 一次性提示与光路收尾；改行序要同步改 draw_hud 的写入索引。
 HUD_FONT = pygame.font.SysFont('consolas,menlo,monospace', 16)
-HUD_KEY_HINTS = 'R reset timeline | Z undo | X redo'
-# ↑ 键位行固定展示：只剩复位与撤重做。模式切换 / 单步 / 调速按键都随“三套模式归为 AUTO”
+# ↑ 键位行固定展示：只剩撤重做。模式切换 / 单步 / 调速按键都随“三套模式归为 AUTO”
 #   一起取消了，刻间隔也固定不可调，所以这行不该再出现任何时序调节的暗示。
 HUD_LINES = [
-    'tool: ' + TOOL_NAMES[1],
-    ' | '.join(TOOL_NAMES),                                  # 1 工具条
-    'RMB place | LMB delete | MMB drag | wheel zoom',
-    'Q / E rotate element | F toggles light, F on store resets its output',
+    'RMB / Enter place | LMB / Del erase | MMB drag | wheel zoom',
+    'Q / E rotate element | F toggles laser, F on latch resets its output',
     'M minimap on/off (local map = 0.05x view) | LMB on MAP jumps the view',
-    'Z undo | X redo | F1/F2/F3 save | F4 load | Enter+F4 paste at cursor',
-    HUD_KEY_HINTS,
+    'Z undo | X redo | F1/F2/F3 save | F4 load | V paste at cursor',
     'tick 0  delay preset 3 ticks',
     'slots: - | undo 0 redo 0',
     'trace: -',
@@ -1253,21 +1330,20 @@ hud_y = 8
 def draw_hud():
     """左上角操作提示层：纯展示，不参与取格。
 
-    时序只占一行（索引 7）：当前刻号 + 延时预设 + 正在放行的延时块数 + 复位提示。
+    时序只占一行（索引 7）：当前刻号 + 延迟预设 + 正在放行的延迟线数 + 复位提示。
     模式、刻间隔、导通门数、被熄灭灯数这些以前各占一行的东西全部删掉——极简时序口径下
     它们要么恒定不变、要么对玩家没有决策价值；光路收尾状态仍由末行 trace 显示。
     一次性提示（_note 写进来的那条）到期自动消失，判定在本函数里做，不必起定时器。
     """
-    HUD_LINES[0] = 'tool: ' + TOOL_NAMES[current_tool]
-    # 索引与静态模板逐行对齐：7 时序、8 槽位与栈深、9 提示与光路收尾
-    HUD_LINES[7] = ('tick %d  delay preset %d ticks  ready %d%s' % (
-        tick_index, delay_setting, delay_ready, ('  [%s]' % tick_note) if tick_note else ''))
-    HUD_LINES[8] = ('slots: %s | %s | undo %d redo %d' % (
+    # 元件信息（当前工具 / 工具条）已改由底部快捷栏显示，HUD 不再重复；索引：5 时序、6 槽位与栈深、7 提示与光路收尾
+    HUD_LINES[4] = ('tick %d  delay preset %d ticks  ready %d%s' % (
+        tick_index, delay_line_setting, delay_line_ready, ('  [%s]' % tick_note) if tick_note else ''))
+    HUD_LINES[5] = ('slots: %s | %s | undo %d redo %d' % (
         '  '.join(save_status.get(s, '%d:-' % s) for s in SAVE_SLOTS),
         'unsaved *' if world_dirty else 'saved',
         len(undo_stack), len(redo_stack)))
     note = _message if (_message and time.perf_counter() <= _message_until) else ''
-    HUD_LINES[9] = ('%s | trace %s' % (note, trace_note)) if note else ('trace ' + trace_note)
+    HUD_LINES[6] = ('%s | trace %s' % (note, trace_note)) if note else ('trace ' + trace_note)
     y = hud_y
     for text_line in HUD_LINES:
         surf, bg = _text(HUD_FONT, text_line, _HUD_SURFACE_CACHE, 256, (10, 3))
@@ -1281,11 +1357,14 @@ def draw_hud():
 # 开关 / 存读 / 撤重做），因此加按键只需要多一个分支，不会牵动状态模型。
 # 两条容易误解的派发优先级：
 #   小地图优先——落在图内的点击一律当导航，绝不穿透成放置 / 擦除；
-#   F4 与 Enter 互认——谁先按下都判成“粘贴”，见 commit_pending_f4 的延时仲裁。
+#   F4 与 Enter 各自独立——F4 单独键整盘读档，Enter 单独键在光标处粘贴，两者不再耦合。
 # 一切改世界的动作都必须先 push_undo 再改，并置 grid_changed / world_dirty 两个脏标记。
 TOOL_KEY_MAP = {pygame.K_0 + i: i for i in range(len(TOOL_TYPES))}   # 数字键 0-7 对应工具下标
 is_dragging = False
 last_mouse_pos = (0, 0)
+delete_held = False        # Delete 长按标志：True 时每帧连续擦除光标格，光标移到哪删哪
+place_held = False         # Enter 长按标志：True 时每帧连续放置当前工具，光标移到哪放到哪
+_place_last_coord = None   # 长按连续放置的上一格：同格下一帧跳过，避免每帧重复压撤销栈
 
 def place_element() -> None:
     """右键放置当前工具的元件；改之前先把这一格的改前状态压栈（同格覆盖也记一步）。"""
@@ -1309,6 +1388,26 @@ def erase_element() -> None:
     reset_timeline('erase')
     grid_changed = world_dirty = True
 
+def delete_erase_at_cursor() -> None:
+    """Delete 擦除入口：光标压在底部快捷栏或小地图上时不穿透误删。"""
+    _mp = pygame.mouse.get_pos()
+    if minimap_hit(_mp) or hotbar_index_at(_mp) is not None:
+        return
+    erase_element()                                 # 复用左键擦除：压栈+复位时序，行为一致
+
+def place_at_cursor() -> None:
+    """Enter 放置入口：光标压在底部快捷栏或小地图上时不穿透误放；
+    长按时每格只放一次——停在同一格下一帧跳过，避免每帧重复压撤销栈。"""
+    global _place_last_coord
+    _mp = pygame.mouse.get_pos()
+    if minimap_hit(_mp) or hotbar_index_at(_mp) is not None:
+        return                                    # 与 Delete 同口径：落 UI 不穿透
+    coord = _cursor_coord()
+    if coord == _place_last_coord:
+        return                                    # 长按停在同一格：本帧不重复放
+    place_element()                               # 复用右键放置：压栈+复位时序，行为一致
+    _place_last_coord = coord
+
 def _cursor_coord() -> Coord:
     """光标所在格（撤销 delta 要按格登记，故坐标与数据各取一个助手）。"""
     return screen_to_grid(*pygame.mouse.get_pos())
@@ -1321,59 +1420,59 @@ def _cursor_element() -> Optional[dict]:
 def rotate_element(step: int) -> None:
     """Q(step=-1) / E(step+1)：一个键位干三件事，按“光标下是什么”分流。
 
-    1) 光标下是普通元件：转朝向（dir 顺时针 +1 / 逆时针 -1）；存储石还要把 in_levels
+    1) 光标下是普通元件：转朝向（dir 顺时针 +1 / 逆时针 -1）；光锁存器还要把 in_levels
        置 None，让新朝向的输入边只记基准、不补算上升沿，免得转一下白翻一次。
-    2) 光标下是延时块：它四向对称，转了没有任何可见差别，于是把这个键位让给
-       “调延时刻度”（1~12 刻），并把延迟线清空——线长上限变了，旧线位没有意义。
-    3) 光标压在空格上且当前工具是延时块：调的是放置预设 delay_setting，
+    2) 光标下是延迟线：它四向对称，转了没有任何可见差别，于是把这个键位让给
+       “调延迟刻度”（1~12 刻），并把延迟队列清空——线长上限变了，旧线位没有意义。
+    3) 光标压在空格上且当前工具是延迟线：调的是放置预设 delay_line_setting，
        可以先定好刻度再连着摆一排同刻度的块。
     三种情况都算“改世界”，一律压撤销步并复位时序。
     """
-    global grid_changed, world_dirty, delay_setting
+    global grid_changed, world_dirty, delay_line_setting
     data = _cursor_element()
     if data is None:
-        if TOOL_TYPES[current_tool] != 'delay':
+        if TOOL_TYPES[current_tool] != 'delay_line':
             return
-        new_setting = max(DELAY_MIN_TICKS, min(delay_setting + step, DELAY_MAX_TICKS))
-        if new_setting == delay_setting:
+        new_setting = max(DELAY_LINE_MIN_TICKS, min(delay_line_setting + step, DELAY_LINE_MAX_TICKS))
+        if new_setting == delay_line_setting:
             return
-        delay_setting = new_setting
-        _note('delay preset now %d ticks' % delay_setting)
+        delay_line_setting = new_setting
+        _note('delay preset now %d ticks' % delay_line_setting)
         return
-    if _etype(data) == 'delay':
-        new_ticks = _delay_ticks(data)
-        new_ticks = max(DELAY_MIN_TICKS, min(new_ticks + step, DELAY_MAX_TICKS))
-        if new_ticks == _delay_ticks(data):
+    if _etype(data) == 'delay_line':
+        new_ticks = _delay_line_ticks(data)
+        new_ticks = max(DELAY_LINE_MIN_TICKS, min(new_ticks + step, DELAY_LINE_MAX_TICKS))
+        if new_ticks == _delay_line_ticks(data):
             return
         push_undo([_cursor_coord()])
-        data['delay'] = new_ticks
-        data['pipe'] = []                            # 改刻度等于重新拉一次延迟线
+        data['ticks'] = new_ticks
+        data['pipe'] = []                            # 改刻度等于重新拉一次延迟队列
         data['out_ready'] = ()
         _note('delay now %d ticks' % new_ticks)
     else:
         push_undo([_cursor_coord()])
         data['dir'] = (data['dir'] + step) % 4
-        if _etype(data) == 'store':
+        if _etype(data) == 'latch':
             data['in_levels'] = None
     reset_timeline('rotate')
     grid_changed = world_dirty = True
 
 def toggle_switch() -> None:
-    """F 键：光源切手动开关；存储石复位输出为 0；延时块清空手上那条延迟线（吐光卡住时手动排空）。
+    """F 键：激光器切手动开关；光锁存器复位输出为 0；延迟线清空手上那条延迟队列（吐光卡住时手动排空）。
 
-    镜与半透由光驱动，不处理。
+    反射镜与分束器由光驱动，不处理。
     """
     global grid_changed, world_dirty
     data = _cursor_element()
     if data is None:
         return
     element_type = _etype(data)
-    if element_type not in SWITCHABLE_TYPES and element_type not in ('store', 'delay'):
+    if element_type not in SWITCHABLE_TYPES and element_type not in ('latch', 'delay_line'):
         return
     push_undo([_cursor_coord()])
     if element_type in SWITCHABLE_TYPES:
         data['is_on'] = not data.get('is_on', True)
-    elif element_type == 'store':
+    elif element_type == 'latch':
         data['state'] = 0
         data['in_levels'] = None
     else:
@@ -1418,27 +1517,13 @@ def pan_camera(dt: float) -> None:
             else:
                 camera_y += pan_speed * factor
 
-_f4_armed = False
-_f4_armed_at = 0.0
-F4_COMMIT_S = 0.12           # F4 延时提交窗口：窗口内等到 Enter 就算粘贴，等不到才算读档
-
-
-def commit_pending_f4() -> None:
-    """主循环里调用：F4 按下后过了提交窗口仍没有 Enter 跟随，才执行普通读档。
-
-    先按 Enter 还是先按 F4 都判成粘贴 —— 先 Enter 时靠 F4 落下瞬间 get_pressed 里 Enter 仍按住，
-    先 F4 时靠这口延时闸把读档压住；否则两种按法会打架，出现"先整盘读档、又再粘贴"的双触发。
-    """
-    global _f4_armed
-    if _f4_armed and time.perf_counter() - _f4_armed_at > F4_COMMIT_S:
-        _f4_armed = False
-        load_recent_slot()
 
 
 def handle_event(event):
     """处理一个事件并派发到对应动作；返回 False 表示要退出主循环。"""
-    global current_tool, WINDOW_WIDTH, WINDOW_HEIGHT, _minimap_dragging, is_dragging
-    global last_mouse_pos, _f4_armed, _f4_armed_at
+    global current_tool, WINDOW_WIDTH, WINDOW_HEIGHT, _minimap_dragging, is_dragging, delete_held
+    global place_held, _place_last_coord
+    global last_mouse_pos
     if event.type == pygame.QUIT:
         return False
     if event.type == pygame.VIDEORESIZE:              # 尺寸变化：只更新宽高并重夹相机
@@ -1449,6 +1534,11 @@ def handle_event(event):
             if event.button == 1:
                 _minimap_dragging = True
                 focus_camera_on_map(*event.pos)
+            return True
+        hb_idx = hotbar_index_at(event.pos)           # 底部快捷栏：落在栏内一律当选择，不穿透到放置/擦除
+        if hb_idx is not None:
+            if event.button == 1:
+                current_tool = hb_idx
             return True
         if event.button == 2:
             is_dragging = True                        # 中键：开始拖拽平移
@@ -1461,6 +1551,12 @@ def handle_event(event):
         if event.button == 2:
             is_dragging = False                       # 中键平移只认自己的抬起
         _minimap_dragging = False                     # 缩略图导航任何抬起都复位
+    elif event.type == pygame.KEYUP:
+        if event.key in (pygame.K_DELETE, pygame.K_BACKSPACE):
+            delete_held = False                       # 松开 Delete/退格：停止长按连续擦除
+        elif event.key in (pygame.K_RETURN, pygame.K_KP_ENTER):
+            place_held = False                        # 松开 Enter：停止长按连续放置
+            _place_last_coord = None
     elif event.type == pygame.MOUSEMOTION:
         buttons = event.buttons                       # 按键当前状态，据此能在窗口外松手时退出
         if _minimap_dragging:
@@ -1478,10 +1574,17 @@ def handle_event(event):
     elif event.type == pygame.KEYDOWN:
         if event.key in TOOL_KEY_MAP:
             current_tool = TOOL_KEY_MAP[event.key]
+        elif event.key in (pygame.K_DELETE, pygame.K_BACKSPACE):
+            # Delete/退格：按下即删光标格，并置长按标志（主循环据此逐帧连续擦除）
+            delete_held = True
+            delete_erase_at_cursor()
+        elif event.key in (pygame.K_RETURN, pygame.K_KP_ENTER):
+            # Enter：按下即放当前工具，并置长按标志（主循环据此逐帧连续放置，移到哪放到哪）
+            place_held = True
+            _place_last_coord = None
+            place_at_cursor()
         elif event.key == pygame.K_f:
             toggle_switch()
-        elif event.key == pygame.K_r:
-            manual_reset_timeline()                 # 显式复位时序：刻号归零 + 清空全部延迟线
         elif event.key == pygame.K_m:
             toggle_minimap()
         elif event.key == pygame.K_q:
@@ -1493,25 +1596,19 @@ def handle_event(event):
         elif event.key == pygame.K_x:
             redo()
         elif event.key in (pygame.K_F1, pygame.K_F2, pygame.K_F3):
-            save_slot(event.key - pygame.K_F1 + 1)    # 存槽不分流：按 Enter 也照常存，绝不误触粘贴
+            save_slot(event.key - pygame.K_F1 + 1)    # 存槽只认功能键，与 Enter 粘贴互不干扰
         elif event.key == pygame.K_F4:
-            if pygame.key.get_pressed()[pygame.K_RETURN]:
-                _f4_armed = False
-                paste_slot_at_cursor()                # 先 Enter 后 F4 -> 粘贴
-            else:
-                _f4_armed, _f4_armed_at = True, time.perf_counter()   # 先 F4 -> 开延时闸等 Enter
-        elif event.key in (pygame.K_RETURN, pygame.K_KP_ENTER):
-            if _f4_armed or pygame.key.get_pressed()[pygame.K_F4]:
-                _f4_armed = False
-                paste_slot_at_cursor()                # 先 F4 后 Enter -> 粘贴
+            load_recent_slot()                        # F4 单独键：整盘读取最近槽位
+        elif event.key == pygame.K_v:
+            paste_slot_at_cursor()                    # V 单独键：在光标格粘贴图章（输入法不敏感，避开 Enter）
     return True
 
 
 # ── 11. 存档、读档与撤销重做 ──────────────────────────────────────
 # 本节要同时守住三件事：存档要小、坏档不能崩、撤销不能卡。
 #
-# 存档口径（小）：只落用户字段（坐标 / type / dir / 光源 is_on / 存储石 state 与
-#   in_levels / 延时 delay）外加相机与工具。is_lit、axis_inputs、perp_inputs、input_dirs、
+# 存档口径（小）：只落用户字段（坐标 / type / dir / 激光器 is_on / 光锁存器 state 与
+#   in_levels / 延迟 ticks）外加相机与工具。is_lit、axis_inputs、perp_inputs、input_dirs、
 #   pipe、out_ready、inject 全是派生态或时序态，读回来由 solve_tick 与 reset_timeline
 #   重建；存进去只会带来脏数据（最典型：一份静止存档读回来自己往外吐光）。
 # 读档口径（不崩）：每一条 cell 都要过 _normalize_cell 消毒——未知类型丢弃、越界坐标剔除、
@@ -1528,11 +1625,11 @@ UNDO_LIMIT = 200                           # delta 只记改动格，栈深放�
 MESSAGE_TTL_S = 4.0                          # 一次性提示在 HUD 上停多久
 
 PERSIST_FIELDS = {
-    'block': ('dir',), 'light': ('dir', 'is_on'), 'mirror': ('dir',), 'splitter': ('dir',),
-    'collector': ('dir',), 'crystal': ('dir',), 'store': ('dir', 'state', 'in_levels'),
-    # 延时块只落刻度：pipe / out_ready / inject 是时序态，等同于派生态——
+    'wall': ('dir',), 'laser': ('dir', 'is_on'), 'mirror': ('dir',), 'splitter': ('dir',),
+    'coupler': ('dir',), 'and_gate': ('dir',), 'latch': ('dir', 'state', 'in_levels'),
+    # 延迟线只落刻度：pipe / out_ready / inject 是时序态，等同于派生态——
     # 存进去会让一份静止的存档读回来自己往外吐光，一律由 reset_timeline 从零刻重建。
-    'delay': ('dir', 'delay'),
+    'delay_line': ('dir', 'ticks'),
 }
 
 # 撤销栈：一步 = 若干条 (格子, 改前数据)；改前数据为 None 表示那格原本空着。
@@ -1563,7 +1660,7 @@ def _encode_levels(value):
 
 def _decode_levels(value) -> Optional[frozenset]:
     """
-        _encode_levels 的逆运算：-1 与 null 都还原成 None（未定义基准）。null 若被当成空集，语义就变成“基准=没有输入边为 1”：读档当轮只要有一条输入边受光就会被算成上升沿，存储石凭空翻转一次。
+        _encode_levels 的逆运算：-1 与 null 都还原成 None（未定义基准）。null 若被当成空集，语义就变成“基准=没有输入边为 1”：读档当轮只要有一条输入边受光就会被算成上升沿，光锁存器凭空翻转一次。
     """
     if value is None or value == -1:
         return None
@@ -1612,16 +1709,16 @@ def _normalize_cell(key, item):
     for f in PERSIST_FIELDS[etype]:
         if f in item:
             data[f] = _decode_levels(item[f]) if f == 'in_levels' else item[f]
-    if etype == 'light' and data.get('is_on') is None:
+    if etype == 'laser' and data.get('is_on') is None:
         data['is_on'] = True                            # null 的开关按“开”处理，别读成关
     try:
         data['dir'] = int(data['dir']) % 4
     except (TypeError, ValueError):
         data['dir'] = 0
-    if etype == 'store':
+    if etype == 'latch':
         data['state'] = int(data.get('state') or 0) % 2
-    if etype == 'delay':
-        data['delay'] = _delay_ticks(data)              # 乱值 / 越界一律夹回合法区间
+    if etype == 'delay_line':
+        data['ticks'] = _delay_line_ticks(data)              # 乱值 / 越界一律夹回合法区间
     return coord, data
 
 def _try_float(value, fallback: float) -> float:
@@ -1743,7 +1840,7 @@ def load_slot(slot: int) -> bool:
         clamp_camera()
     world_dirty = False
     last_slot = slot
-    timeline_present = any(_etype(d) == 'delay' for d in cells.values())
+    timeline_present = any(_etype(d) == 'delay_line' for d in cells.values())
     reset_timeline('load slot %d' % slot)
     _note('loaded slot %d  (%d cells)' % (slot, len(grid_data)))
     _refresh_slot_status()
@@ -1761,7 +1858,7 @@ def load_recent_slot() -> bool:
 
 
 def paste_slot_at_cursor(slot: int = 0) -> bool:
-    """Enter+F4 粘贴：把存档当成一块图章盖在当前光标格上，整块平移、相对位置保持不变。
+    """Enter 粘贴：把存档当成一块图章盖在当前光标格上，整块平移、相对位置保持不变。
 
     对齐口径：取存档里 row 与 col 的最小值当作这块内容的左上角，平移量 = 光标格 - 这个角，
     于是存档的左上角正好落在光标格上，其余元件按同一个偏移量跟着平移。
@@ -1878,13 +1975,13 @@ def redo() -> bool:
 _refresh_slot_status()                                  # 启动即扫档，HUD 一开就有槽位状态
 
 # ── 12. 主循环 ────────────────────────────────────────────────────
-# 一帧五步：收事件 -> 提交延时中的 F4 -> 键盘平移 -> 到点就走一刻 -> 渲染并翻页。
+# 一帧四步：收事件 -> 键盘平移 -> 到点就走一刻 -> 渲染并翻页。
 # 时序在这里只有一条路径：距上一次推进满 TICK_INTERVAL_S 秒就调 step_tick()，
 # 没有模式分支、没有等待单步；这就是“三套模式归为 AUTO”之后剩下的全部调度逻辑。
 def main():
-    """收事件 -> 提交延时中的 F4 -> 键盘平移 -> 按固定节奏推进时序 -> 渲染并翻页，固定 60 FPS。
+    """收事件 -> 键盘平移 -> 按固定节奏推进时序 -> 渲染并翻页，固定 60 FPS。
 
-    时序只有一条路径：每 TICK_INTERVAL_S 秒走一刻（解一次光路 + 推一次延迟线），
+    时序只有一条路径：每 TICK_INTERVAL_S 秒走一刻（解一次光路 + 推一次延迟队列），
     没有模式分支、没有单步等待。刚编辑完（grid_changed）时把计时拨到点，下一帧立刻
     补走一刻，保证右键放下去画面马上有反应，而刻与刻之间的间隔仍然是固定值。
     """
@@ -1896,8 +1993,11 @@ def main():
         for event in pygame.event.get():
             if not handle_event(event):
                 running = False
-        commit_pending_f4()                                  # F4 单独按满 0.12s 才真读档
         pan_camera(dt)
+        if delete_held:
+            delete_erase_at_cursor()                  # 长按 Delete：光标移到哪删哪
+        if place_held:
+            place_at_cursor()                         # 长按 Enter：光标移到哪放到哪（同格不重复）
         if grid_changed:                                     # 编辑过：下一帧就补走一刻
             grid_changed = False                             # 把计时拨到“早就该走了”，下一帧立刻补
             last_tick_at = 0.0                               # 右键放下去画面马上有反应，刻长仍是固定值
