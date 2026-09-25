@@ -26,21 +26,30 @@ AND 判定 -> 锁存上升沿 -> 灯灭锁定），再由 _advance_delay_lines()
 存档与设置固定写入可执行文件同级的 saves/ 目录（见 BASE_DIR 判定）。
 """
 
+# ── 标准库 ──────────────────────────────────────────────
 import bisect
 import copy
 import json
 import os
 import random
 import sys
-import tempfile
 import time
 from collections import deque
 from dataclasses import dataclass, field
 from typing import Callable, Deque, Dict, Iterator, List, Optional, Set, Tuple
 
+# ── 第三方 ──────────────────────────────────────────────
 import pygame
 
 pygame.init()
+
+# 让 Windows 任务栏正确显示自定义图标（与 exe 图标解耦，仅 win32 生效）
+if sys.platform == "win32":
+    try:
+        import ctypes
+        ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID("GateOfLight")
+    except Exception:
+        pass
 
 
 COLOR_ON = (100, 149, 237)
@@ -70,12 +79,12 @@ MIN_ZOOM, MAX_ZOOM, ZOOM_STEP = 0.4, 5.0, 0.1
 PAN_SPEED_PX = 500
 MAX_FRAME_DT_S = 0.05
 
-MAX_RAY_STEPS = 1000000
-MAX_LIGHT_ROUNDS = 100
-MAX_RAYS_PER_ROUND = 1000000
-MAX_STEPS_PER_ROUND = 1000000
-MAX_TRACE_SEGMENTS = 1000000
-TRACE_TIME_LIMIT_S = 0.30
+MAX_RAY_STEPS = 10000
+MAX_LIGHT_ROUNDS = 10000
+MAX_RAYS_PER_ROUND = 10000
+MAX_STEPS_PER_ROUND = 10000
+MAX_TRACE_SEGMENTS = 10000
+TRACE_TIME_LIMIT_S = 0.05
 
 DELAY_LINE_DEFAULT_TICKS = 1
 DELAY_LINE_MIN_TICKS, DELAY_LINE_MAX_TICKS = 1, 12
@@ -108,7 +117,7 @@ PLACE_BTN = 3
 ERASE_BTN = 1
 
 SAVE_VERSION = 1
-SAVE_SLOTS = (1, 2, 3)
+SAVE_SLOTS = (1,)
 MAX_CELLS_LIMIT = 200000
 UNDO_LIMIT = 200
 MESSAGE_TTL_S = 4.0
@@ -127,13 +136,12 @@ KEY_TOGGLE_SWITCH = pygame.K_f
 KEY_TOGGLE_MINIMAP = pygame.K_m
 KEY_PASTE_SLOT = pygame.K_v
 KEY_UNDO = pygame.K_z
-KEY_REDO = pygame.K_c
-KEY_ERASER = pygame.K_x
+KEY_REDO = pygame.K_x
 KEY_TOGGLE_PAUSE = pygame.K_SPACE
 KEY_SAVE_SLOT_BASE = pygame.K_F1
-KEY_SAVE_SLOTS = (pygame.K_F1, pygame.K_F2, pygame.K_F3)
-SAVE_SLOT_KEYS = {pygame.K_F1: 1, pygame.K_F2: 2, pygame.K_F3: 3}
-KEY_LOAD_SLOT = pygame.K_F4
+KEY_SAVE_SLOTS = (pygame.K_F1,)
+SAVE_SLOT_KEYS = {pygame.K_F1: 1}
+KEY_LOAD_SLOT = pygame.K_F2
 KEY_TOGGLE_PERF = pygame.K_F12
 KEY_BACK = pygame.K_ESCAPE
 KEY_PAN_LEFT = pygame.K_LEFT
@@ -153,7 +161,6 @@ _DEFAULT_KEYS = {
     'tool_6': pygame.K_6, 'tool_7': pygame.K_7,
     'undo': KEY_UNDO,
     'redo': KEY_REDO,
-    'eraser': KEY_ERASER,
     'rotate': KEY_ROTATE_ELEMENT,
     'cycle_rot': KEY_CYCLE_PLACE_ROT,
     'toggle_switch': KEY_TOGGLE_SWITCH,
@@ -161,7 +168,7 @@ _DEFAULT_KEYS = {
     'paste': KEY_PASTE_SLOT,
     'pause': KEY_TOGGLE_PAUSE,
     'perf': KEY_TOGGLE_PERF,
-    'save_1': pygame.K_F1, 'save_2': pygame.K_F2, 'save_3': pygame.K_F3,
+    'save_1': pygame.K_F1,
     'load': KEY_LOAD_SLOT,
     'pan_up': KEY_PAN_UP,
     'pan_down': KEY_PAN_DOWN,
@@ -171,6 +178,8 @@ _DEFAULT_KEYS = {
     'pan_down_alt': KEY_PAN_DOWN_ALT,
     'pan_left_alt': KEY_PAN_LEFT_ALT,
     'pan_right_alt': KEY_PAN_RIGHT_ALT,
+    'zoom_in': pygame.K_EQUALS,
+    'zoom_out': pygame.K_MINUS,
 }
 KEYMAP = dict(_DEFAULT_KEYS)
 # KEY_ACTION_LABELS 在 TOOL_DISPLAY 之后构建（键位已拆分为逐工具/逐存档槽）
@@ -208,7 +217,6 @@ def apply_keymap() -> None:
     g = globals()
     g['KEY_UNDO'] = KEYMAP['undo']
     g['KEY_REDO'] = KEYMAP['redo']
-    g['KEY_ERASER'] = KEYMAP['eraser']
     g['KEY_ROTATE_ELEMENT'] = KEYMAP['rotate']
     g['KEY_CYCLE_PLACE_ROT'] = KEYMAP['cycle_rot']
     g['KEY_TOGGLE_SWITCH'] = KEYMAP['toggle_switch']
@@ -218,8 +226,8 @@ def apply_keymap() -> None:
     g['KEY_TOGGLE_PERF'] = KEYMAP['perf']
     g['KEY_LOAD_SLOT'] = KEYMAP['load']
     g['TOOL_KEY_MAP'] = {KEYMAP['tool_%d' % i]: i for i in range(len(TOOL_TYPES))}
-    g['KEY_SAVE_SLOTS'] = tuple(KEYMAP['save_%d' % i] for i in (1, 2, 3))
-    g['SAVE_SLOT_KEYS'] = {KEYMAP['save_%d' % i]: i for i in (1, 2, 3)}
+    g['KEY_SAVE_SLOTS'] = tuple(KEYMAP['save_%d' % i] for i in (1,))
+    g['SAVE_SLOT_KEYS'] = {KEYMAP['save_%d' % i]: i for i in (1,)}
     g['PAN_KEYS'] = (
         (KEYMAP['pan_left'], KEYMAP['pan_left_alt'], 'x', -1),
         (KEYMAP['pan_right'], KEYMAP['pan_right_alt'], 'x', 1),
@@ -252,7 +260,47 @@ BASE_DIR = _resolve_base_dir()
 SAVE_DIR = os.path.join(BASE_DIR, "saves")
 SETTINGS_PATH = os.path.join(SAVE_DIR, "settings.json")
 
+def _make_app_icon(size: int = 64) -> pygame.Surface:
+    """程序化生成窗口 / 任务栏图标：蓝色发光光子 + 一束折射光，呼应 GateOfLight。"""
+    s = pygame.Surface((size, size), pygame.SRCALPHA)
+    pygame.draw.circle(s, (12, 16, 30, 255), (size // 2, size // 2), size // 2)
+    pygame.draw.circle(s, (60, 130, 255, 255), (size // 2, size // 2), size // 2,
+                       max(2, size // 20))
+    pygame.draw.circle(s, (90, 170, 255, 255), (size // 2, size // 2), size // 5)
+    pygame.draw.line(s, (150, 210, 255, 255),
+                     (size // 8, size - size // 6), (size - size // 8, size // 6),
+                     max(2, size // 22))
+    return s
+
+
+def resource_path(rel: str) -> str:
+    """资源文件绝对路径：打包(PyInstaller frozen)后优先取解包临时目录 sys._MEIPASS，
+    找不到再退回 exe/脚本同级目录 BASE_DIR。"""
+    if getattr(sys, "frozen", False):
+        meipass = getattr(sys, "_MEIPASS", None)
+        if meipass:
+            cand = os.path.join(meipass, rel)
+            if os.path.exists(cand):
+                return cand
+    return os.path.join(BASE_DIR, rel)
+
+
+def _load_app_icon(fallback_size: int = 64):
+    """优先使用项目自带的 GateOfLight.ico 作为窗口/任务栏图标；
+    依次尝试 .ico/.png，全部缺失或加载失败时优雅降级为程序化绘制的图标，
+    保证任何情况下都不会因为缺图标而崩溃。"""
+    for name in ("GateOfLight.ico", "GateOfLight.png", "app.ico"):
+        path = resource_path(name)
+        if os.path.exists(path):
+            try:
+                return pygame.image.load(path)
+            except Exception:
+                pass
+    return _make_app_icon(fallback_size)
+
+
 screen = pygame.display.set_mode((WINDOW_WIDTH, WINDOW_HEIGHT), pygame.RESIZABLE)
+pygame.display.set_icon(_load_app_icon())
 pygame.display.set_caption('GateOfLight')
 clock = pygame.time.Clock()
 
@@ -295,6 +343,7 @@ _idx_col_rows: Dict[int, list] = {}
 
 
 def _index_track(coord: Coord, data: dict) -> None:
+    """把一格登记进增量索引：行列有序表 + 按类型(laser/latch/delay)分类集合。"""
     row, col = coord
     bisect.insort(_idx_row_cols.setdefault(row, []), col)
     bisect.insort(_idx_col_rows.setdefault(col, []), row)
@@ -308,6 +357,7 @@ def _index_track(coord: Coord, data: dict) -> None:
 
 
 def _index_untrack(coord: Coord, data: Optional[dict]) -> None:
+    """把一格从增量索引中移除，与 _index_track 对称。"""
     row, col = coord
     lst = _idx_row_cols.get(row)
     if lst:
@@ -333,6 +383,7 @@ def _index_untrack(coord: Coord, data: Optional[dict]) -> None:
 
 
 def _rebuild_indices() -> None:
+    """清空并从 grid_data 全量重建所有增量索引。"""
     _idx_laser.clear(); _idx_latch.clear(); _idx_delay.clear()
     _idx_row_cols.clear(); _idx_col_rows.clear()
     _lit_relay.clear(); _touched_and.clear()
@@ -371,16 +422,17 @@ TOOL_NAMES = ['%d %s' % (i, name) for i, name in enumerate(TOOL_DISPLAY)]
 KEY_ACTION_LABELS = (
     [('tool_%d' % i, 'Select tool   %s' % TOOL_NAMES[i])
      for i in range(len(TOOL_TYPES))]
-    + [('undo', 'Undo'), ('redo', 'Redo'), ('eraser', 'Eraser mode'),
+    + [('undo', 'Undo'), ('redo', 'Redo'),
        ('rotate', 'Rotate element'), ('cycle_rot', 'Cycle place rotation'),
        ('toggle_switch', 'Toggle switch / power'), ('minimap', 'Toggle minimap'),
        ('paste', 'Stamp-paste slot'), ('pause', 'Pause / resume'),
        ('perf', 'Toggle perf panel')]
-    + [('save_%d' % i, 'Save slot   %d' % i) for i in (1, 2, 3)]
-    + [('load', 'Load last slot'), ('pan_up', 'Pan up'), ('pan_down', 'Pan down'),
+    + [('save_1', 'Save')]
+    + [('load', 'Load'), ('pan_up', 'Pan up'), ('pan_down', 'Pan down'),
        ('pan_left', 'Pan left'), ('pan_right', 'Pan right'),
        ('pan_up_alt', 'Pan up  (alt)'), ('pan_down_alt', 'Pan down  (alt)'),
-       ('pan_left_alt', 'Pan left  (alt)'), ('pan_right_alt', 'Pan right  (alt)')]
+       ('pan_left_alt', 'Pan left  (alt)'), ('pan_right_alt', 'Pan right  (alt)'),
+       ('zoom_in', 'Zoom in'), ('zoom_out', 'Zoom out')]
 )
 
 trace_note = 'ok'
@@ -547,6 +599,7 @@ def latch_ports(out_dir):
     return out_dir, tuple(d for d in range(4) if d != out_dir)
 
 def _next_cell(row, col, direction):
+    """沿 direction 前进一格，返回新的 (row, col)。"""
     d_row, d_col = STEP_BY_DIR[direction]
     return row + d_row, col + d_col
 
@@ -562,6 +615,7 @@ def _ray_end_at_world_edge(col, row, direction):
     return (value, end_y) if axis == 'x' else (end_x, value)
 
 def _in_world_bounds(row, col):
+    """判断 (row, col) 是否落在世界边界内。"""
     return -WORLD_HALF_COLS <= col < WORLD_HALF_COLS and -WORLD_HALF_ROWS <= row < WORLD_HALF_ROWS
 
 def _add_segment(segments: List[Segment], start: Point, end: Point) -> None:
@@ -1282,7 +1336,19 @@ def draw_scene(ray_segments: List[Segment]) -> None:
     draw_minimap(ray_segments)
     draw_hotbar()
 
-MM_FONT = pygame.font.SysFont('consolas,menlo,monospace', 12)
+# ---------------------------------------------------------------------------
+# 字体加载：统一使用系统 monospace 等宽字体
+# ---------------------------------------------------------------------------
+def _load_font(size, bold=False):
+    """加载系统等宽字体（consolas/menlo/monospace）。
+    size 为像素字号，bold=True 时通过 set_bold 做算法加粗。"""
+    font = pygame.font.SysFont('consolas,menlo,monospace', size)
+    if bold:
+        font.set_bold(True)
+    return font
+
+
+MM_FONT = _load_font(12)
 
 minimap_visible = True
 minimap_dirty = True
@@ -1483,12 +1549,12 @@ def toggle_minimap() -> None:
     minimap_visible = not minimap_visible
     minimap_dirty = True
 
-HOTBAR_FONT = pygame.font.SysFont('consolas,menlo,monospace', 11)
-HOTBAR_NAME_FONT = pygame.font.SysFont('consolas,menlo,monospace', 24)
+HOTBAR_FONT = _load_font(11)
+HOTBAR_NAME_FONT = _load_font(24)
 #======================================================================
 #  HUD：快捷栏、旋转/橡皮按钮与命中判定
 #======================================================================
-HOTBAR_NUM_FONT  = pygame.font.SysFont('consolas,menlo,monospace', 20, bold=True)
+HOTBAR_NUM_FONT  = _load_font(20, bold=True)
 
 def _hotbar_rects() -> List[pygame.Rect]:
     """按当前窗口宽算出 n 个格子矩形：整体水平居中、贴窗口底部。"""
@@ -1496,7 +1562,10 @@ def _hotbar_rects() -> List[pygame.Rect]:
     step = HOTBAR_CELL + HOTBAR_GAP
     total = n * step - HOTBAR_GAP
     win_w, win_h = screen.get_size()
-    x0 = max(4, (win_w - total) // 2)
+    # 整组宽度含左侧旋转按钮，使「旋转按钮 + 元件格排」整体水平居中
+    group_total = HOTBAR_CELL + HOTBAR_GAP + total
+    left = max(4, (win_w - group_total) // 2)
+    x0 = left + HOTBAR_CELL + HOTBAR_GAP
     y0 = win_h - HOTBAR_CELL - HOTBAR_BOTTOM_PAD
     return [pygame.Rect(x0 + i * step, y0, HOTBAR_CELL, HOTBAR_CELL) for i in range(n)]
 
@@ -1522,7 +1591,7 @@ def _is_ui_pos(pos) -> bool:
     if hotbar_index_at(pos) is not None:
         return True
     rot, era = _side_btn_rects()
-    return rot.collidepoint(pos) or era.collidepoint(pos)
+    return rot.collidepoint(pos)
 
 def _hotbar_icon_name(tool_type: str) -> str:
     """快捷栏图标取该元件的"亮态"贴图；墙无开态，直接取其单一贴图名。"""
@@ -1550,11 +1619,11 @@ def draw_hotbar() -> None:
         screen.blit(shadow, (rect.x + 4, rect.y + 3))
         screen.blit(num,    (rect.x + 3, rect.y + 2))
     label = HOTBAR_NAME_FONT.render('Eraser' if eraser_mode else TOOL_DISPLAY[current_tool], True, COLOR_ON)
-    lx = (rects[0].x + rects[-1].right) // 2 - label.get_width() // 2
+    rot_btn, _era = _side_btn_rects()
+    lx = (rot_btn.x + rects[-1].right) // 2 - label.get_width() // 2
     ly = rects[0].top - label.get_height() - 4
     screen.blit(label, (lx, ly))
     _draw_rotate_btn()
-    _draw_eraser_btn()
 
 def _draw_ui_button(rect, active, draw_icon, label) -> None:
     """快捷栏同款按钮绘制（旋转 / 橡皮擦按钮共用，与底部元件格子完全同一口径）：
@@ -1601,20 +1670,6 @@ def _draw_rotate_btn() -> None:
 
     _draw_ui_button(rot, bool(place_rot), _icon, _key_label(KEY_CYCLE_PLACE_ROT))
 
-def _draw_eraser_btn() -> None:
-    """右侧橡皮擦按钮：橡皮块边框与中线始终保留；选中时另有蓝粗外框。
-    底 / 外框 / 左上角序号一律走快捷栏同款 _draw_ui_button（序号为 X）。"""
-    _, era = _side_btn_rects()
-
-    def _icon(active):
-        rect = pygame.Rect(0, 0, int(era.w * 0.45), int(era.h * 0.65))
-        rect.center = era.center
-        pygame.draw.rect(screen, COLOR_OFF, rect, 0, 4)
-        pygame.draw.rect(screen, COLOR_ON, rect, 6)
-        pygame.draw.line(screen, COLOR_ON,
-                         (rect.left, rect.centery), (rect.right, rect.centery), 4)
-
-    _draw_ui_button(era, eraser_mode, _icon, _key_label(KEY_ERASER))
 TOOL_KEY_MAP = {KEY_TOOL_BASE + i: i for i in range(len(TOOL_TYPES))}
 is_dragging = False
 last_mouse_pos = (0, 0)
@@ -1859,10 +1914,6 @@ def handle_event(event):
             if event.button == 1:
                 place_rot = (place_rot + 1) % 4
             return True
-        if _eb.collidepoint(event.pos):
-            if event.button == 1:
-                eraser_mode = not eraser_mode
-            return True
         if event.button == 2:
             is_dragging = True
             last_mouse_pos = pygame.mouse.get_pos()
@@ -1903,6 +1954,10 @@ def handle_event(event):
     elif event.type == pygame.KEYDOWN:
         if event.key in TOOL_KEY_MAP:
             current_tool = TOOL_KEY_MAP[event.key]
+        elif event.key in (KEYMAP['zoom_in'], pygame.K_KP_PLUS):
+            zoom_camera(1)
+        elif event.key in (KEYMAP['zoom_out'], pygame.K_KP_MINUS):
+            zoom_camera(-1)
         elif event.key == KEY_TOGGLE_SWITCH:
             toggle_switch()
         elif event.key == KEY_TOGGLE_MINIMAP:
@@ -1913,8 +1968,6 @@ def handle_event(event):
             place_rot = (place_rot + 1) % 4
         elif event.key == KEY_UNDO:
             undo()
-        elif event.key == KEY_ERASER:
-            eraser_mode = not eraser_mode
         elif event.key == KEY_REDO:
             redo()
         elif event.key in SAVE_SLOT_KEYS:
@@ -1958,6 +2011,7 @@ def _note(msg: str) -> None:
     _message_until = time.perf_counter() + MESSAGE_TTL_S
 
 def _slot_path(slot: int) -> str:
+    """返回指定存档槽位对应的文件路径。"""
     return os.path.join(SAVE_DIR, 'slot%d.json' % slot)
 
 def _encode_levels(value):
@@ -1991,7 +2045,18 @@ def serialize_world(with_camera: bool = True) -> dict:
             continue
         item = {'type': etype}
         for f in fields:
-            item[f] = _encode_levels(data[f]) if f == 'in_levels' else data.get(f)
+            if f == 'in_levels':
+                item[f] = _encode_levels(data[f])
+                continue
+            v = data.get(f)
+            # 与默认值相同的字段不写，读档时用 TOOL_SPECS 默认补齐，省长度且向后兼容
+            if f == 'dir' and v == 0:
+                continue
+            if f == 'is_on' and v is True:
+                continue
+            if f == 'state' and v == 0:
+                continue
+            item[f] = v
         cells['%d,%d' % (row, col)] = item
     out = {'version': SAVE_VERSION, 'cells': cells}
     if with_camera:
@@ -2073,7 +2138,7 @@ def save_slot(slot: int) -> bool:
         os.makedirs(SAVE_DIR, exist_ok=True)
         path = _slot_path(slot)
         with open(path + '.tmp', 'w', encoding='utf-8') as fh:
-            json.dump(serialize_world(), fh, ensure_ascii=False, indent=2)
+            json.dump(serialize_world(), fh, ensure_ascii=False, separators=(',', ':'))
         os.replace(path + '.tmp', path)
     except OSError as exc:
         _note('save slot %d FAILED: %s' % (slot, exc))
@@ -2159,7 +2224,7 @@ def load_recent_slot() -> bool:
     """F4 读取：整盘替换为存档内容（相机与工具也跟着还原）。"""
     slot = _f4_target_slot()
     if not slot:
-        _note('no save yet  (F1 / F2 / F3 to save)')
+        _note('no save yet  (F1 to save)')
         return False
     return load_slot(slot)
 
@@ -2176,7 +2241,7 @@ def paste_slot_at_cursor(slot: int = 0) -> bool:
     global grid_changed, minimap_dirty, world_dirty, last_slot
     target = slot if slot in SAVE_SLOTS else _f4_target_slot()
     if not target:
-        _note('no save to paste  (F1 / F2 / F3 to save)')
+        _note('no save to paste  (F1 to save)')
         return False
     try:
         cells, _doc = _read_slot(target)
@@ -2286,11 +2351,11 @@ def redo() -> bool:
 
 _refresh_slot_status()
 
-MENU_FONT_TITLE = pygame.font.SysFont('consolas,menlo,monospace', 96, bold=True)
-MENU_FONT_SUB = pygame.font.SysFont('consolas,menlo,monospace', 20)
-MENU_FONT_BTN = pygame.font.SysFont('consolas,menlo,monospace', 40)
-MENU_FONT_SEC = pygame.font.SysFont('consolas,menlo,monospace', 28, bold=True)
-MENU_FONT_BODY = pygame.font.SysFont('consolas,menlo,monospace', 20)
+MENU_FONT_TITLE = _load_font(96)
+MENU_FONT_SUB = _load_font(20)
+MENU_FONT_BTN = _load_font(40)
+MENU_FONT_SEC = _load_font(28)
+MENU_FONT_BODY = _load_font(20)
 screen_state = 'menu'
 _game_esc_time = 0
 _menu_esc_time = 0
@@ -2308,12 +2373,6 @@ _menu_decor_size = None
 #  主菜单 Menu：氛围背景动画、按钮与交互
 #======================================================================
 _menu_decor_last = -1
-
-def _pulse(t_ms, period_ms, lo, hi, phase=0.0):
-    """三角波：随时间在 [lo,hi] 来回折返，避开引入 math 库。"""
-    ph = ((t_ms / period_ms) + phase) % 1.0
-    tri = ph if ph < 0.5 else (1.0 - ph)
-    return lo + (hi - lo) * (tri * 2.0)
 
 def _build_bg_gradient(win_w, win_h, with_grid=True) -> pygame.Surface:
     """全文件唯一的「氛围底」渲染逻辑：竖向渐变（顶部 COLOR_BG -> 底部略偏蓝），
@@ -2383,8 +2442,8 @@ def _menu_decor_step(win_w, win_h, t_ms) -> None:
                     'dir': random.randrange(4),
                     'side': int(ICON_SIZE * (1.5 + random.random() * 0.8)),
                     'born': cur, 'dying': None,
-                    'per': 2200.0 + random.random() * 1600.0,
-                    'ph': random.random(),
+                    # 生成时即确定一枚固定的随机透明度系数(0.35~1.0)，之后保持不变
+                    'base': 0.35 + random.random() * 0.65,
                 }
                 continue
         alive = [k for k, v in _menu_decor.items() if v['dying'] is None]
@@ -2412,8 +2471,8 @@ def _draw_ambient_menu(t_ms) -> None:
             fade = min(1.0, (t_ms - d['born']) / _MENU_DECOR_FADE_MS)
         else:
             fade = 1.0 - min(1.0, (t_ms - d['dying']) / _MENU_DECOR_FADE_MS)
-        breathe = _pulse(t_ms, d['per'], 0.35, 1.0, d['ph'])
-        alpha = max(0, min(255, int(80 * fade * breathe)))
+        # 透明度只随出现/消失淡入淡出(fade)变化，叠加固定的随机 base，不再呼吸脉动
+        alpha = max(0, min(255, int(80 * fade * d['base'])))
         if alpha <= 0:
             continue
         icon = pygame.transform.rotozoom(ICONS[d['name']][d['dir'] % 4], 0,
@@ -2426,45 +2485,27 @@ def _draw_ambient_menu(t_ms) -> None:
 def _start_button_rect() -> pygame.Rect:
     """Start 按钮矩形：水平居中，位于标题下方，尺寸固定，跟随窗口尺寸。"""
     win_w, win_h = screen.get_size()
-    btn_w, btn_h = 320, 64
-    return pygame.Rect(win_w // 2 - btn_w // 2, win_h // 2 - 30, btn_w, btn_h)
+    btn_w, btn_h = 480, 60
+    return pygame.Rect(win_w // 2 - btn_w // 2, win_h // 2 - 60, btn_w, btn_h)
 
 def _tutorial_button_rect() -> pygame.Rect:
     """教学按钮矩形：水平居中，位于 Start 按钮正下方，跟随窗口尺寸。"""
     win_w, win_h = screen.get_size()
-    btn_w, btn_h = 320, 64
-    return pygame.Rect(win_w // 2 - btn_w // 2, win_h // 2 + 60, btn_w, btn_h)
+    btn_w, btn_h = 480, 60
+    return pygame.Rect(win_w // 2 - btn_w // 2, win_h // 2 + 20, btn_w, btn_h)
 
 def _settings_button_rect() -> pygame.Rect:
     """设置按钮矩形：水平居中，位于 Tutorial 按钮正下方，跟随窗口尺寸。"""
     win_w, win_h = screen.get_size()
-    btn_w, btn_h = 320, 64
-    return pygame.Rect(win_w // 2 - btn_w // 2, win_h // 2 + 150, btn_w, btn_h)
-
-def _draw_menu_scrim() -> None:
-    """主界面中央柔光暗底：在氛围背景之上、标题/副标题/Start 按钮之下铺一条竖向渐隐的暗带，
-    使随机刷新的暗色元件即使摆到中央也不会压住文字与按钮（替代旧的中央保留区方案）。
-    竖向 alpha 由中心向上下两侧线性淡出到 0，边缘无硬边；纯现算色，不新增色常量。"""
-    win_w, win_h = screen.get_size()
-    cy = win_h // 2 - 70
-    band = max(120, int(win_h * 0.30))
-    r, g, b = COLOR_BG
-    scrim = pygame.Surface((win_w, 2 * band), pygame.SRCALPHA)
-    for j in range(2 * band):
-        d = abs(j - band) / band
-        a = int(120 * (1 - d)) if d < 1 else 0
-        if a <= 0:
-            continue
-        pygame.draw.line(scrim, (r, g, b, a), (0, j), (win_w, j))
-    screen.blit(scrim, (0, cy - band))
+    btn_w, btn_h = 480, 60
+    return pygame.Rect(win_w // 2 - btn_w // 2, win_h // 2 + 100, btn_w, btn_h)
 
 
 def draw_menu() -> None:
-    """启动界面：程序化氛围背景 + 居中 GateOfLight 标题 + Start/Tutorial/Settings 按钮 + 操作提示。"""
+    """启动界面：程序化氛围背景 + 居中 GATE OF LIGHT 标题 + Start/Tutorial/Settings 按钮 + 操作提示。"""
     _draw_ambient_menu(pygame.time.get_ticks())
-    _draw_menu_scrim()
     win_w, win_h = screen.get_size()
-    title = MENU_FONT_TITLE.render('GateOfLight', True, COLOR_ON)
+    title = MENU_FONT_TITLE.render('GATE OF LIGHT', True, COLOR_ON)
     screen.blit(title, (win_w // 2 - title.get_width() // 2, win_h // 2 - 185))
     for rect, label in ((_start_button_rect(), 'Start'), (_tutorial_button_rect(), 'Tutorial'), (_settings_button_rect(), 'Settings')):
         hovered = rect.collidepoint(pygame.mouse.get_pos())
@@ -2479,7 +2520,7 @@ def draw_menu() -> None:
                                 True, COLOR_OFF)
     screen.blit(hint, (win_w - hint.get_width() - 16, win_h - hint.get_height() - 12))
     if _menu_esc_time and pygame.time.get_ticks() - _menu_esc_time < _ESC_RETURN_WIN:
-        warn = MENU_FONT_SUB.render('Press ESC again to quit', True, (235, 190, 70))
+        warn = MENU_FONT_SUB.render('Press ESC again to quit', True, COLOR_ON)
         screen.blit(warn, (win_w // 2 - warn.get_width() // 2, 12))
 
 def handle_menu_event(event) -> bool:
@@ -2519,7 +2560,7 @@ def build_tutorial_sections():
                             _key_label(KEYMAP['pan_right']), _key_label(KEYMAP['pan_down']))
     alt4 = '%s %s %s %s' % (_key_label(KEYMAP['pan_left_alt']), _key_label(KEYMAP['pan_up_alt']),
                             _key_label(KEYMAP['pan_right_alt']), _key_label(KEYMAP['pan_down_alt']))
-    save_rng = '/'.join(_key_label(KEYMAP['save_%d' % i]) for i in (1, 2, 3))
+    save_rng = _key_label(KEYMAP['save_1'])
     tools_lbl = '/'.join(_key_label(KEYMAP['tool_%d' % i]) for i in range(len(TOOL_TYPES)))
     return [
         ('HOW TO PLAY', [
@@ -2528,13 +2569,15 @@ def build_tutorial_sections():
                 tools_lbl, _key_label(KEYMAP['rotate']),
                 _key_label(KEYMAP['cycle_rot']))),
             ('', '%s move   %s alt move   MMB drag' % (pan4, alt4)),
-            ('', '%s undo  %s redo   %s erase   %s save   %s load   %s stamp-paste' % (
+            ('', '%s undo  %s redo   %s erase' % (
                 _key_label(KEYMAP['undo']), _key_label(KEYMAP['redo']),
-                _key_label(KEYMAP['eraser']), save_rng,
-                _key_label(KEYMAP['load']), _key_label(KEYMAP['paste']))),
-            ('', '%s toggle minimap   %s pause/resume   ESC x2 returns to menu' % (
+                _key_label(pygame.K_DELETE))),
+            ('', '%s save   %s load   %s stamp-paste' % (
+                save_rng, _key_label(KEYMAP['load']), _key_label(KEYMAP['paste']))),
+            ('', '%s toggle minimap   %s pause/resume' % (
                 _key_label(KEYMAP['minimap']), _key_label(KEYMAP['pause']))),
-            ('', 'ESC quit from menu   solver recomputes only on change'),
+            ('', 'ESC x2 returns to menu   ESC quit from menu'),
+            ('', 'solver recomputes only on change'),
             ('', '%s perf panel: FPS / solve ms / cells / undo depth' % (
                 _key_label(KEYMAP['perf']))),
             ('', 'Hold Enter / Del to lay/erase a run; one %s undoes the whole run' % (
@@ -2558,6 +2601,24 @@ def build_tutorial_sections():
             ('', 'Rebind any key under Settings > Keybindings'),
         ]),
     ]
+def _tutorial_wrap(text, _max_chars=None):
+    """把一段教程文本按「完整句子」拆行：以 . ! ? ; 作为句末标点，每句独占一行；
+    冒号只作标签分隔（如 'Wall: ...'）不当作断句，因此一句完整的话不会被截断。"""
+    text = ' '.join(text.split())
+    if not text:
+        return [text]
+    lines = []
+    cur = ''
+    for ch in text:
+        cur += ch
+        if ch in '.!?;':
+            lines.append(cur.strip())
+            cur = ''
+    if cur.strip():
+        lines.append(cur.strip())
+    return lines or [text]
+
+
 def _draw_game_esc_hint() -> None:
     """游戏态顶部提示：第一次 ESC 提示再按一次返回；暂停时右上角亮 PAUSED。"""
     global paused
@@ -2566,10 +2627,10 @@ def _draw_game_esc_hint() -> None:
     if now - _game_esc_time < _ESC_RETURN_WIN:
         msg = 'Unsaved changes - press ESC again to return' if (world_dirty and grid_data) \
             else 'Press ESC again to return to menu'
-        t = MENU_FONT_SUB.render(msg, True, (235, 190, 70))
+        t = MENU_FONT_SUB.render(msg, True, COLOR_ON)
         screen.blit(t, (win_w // 2 - t.get_width() // 2, 12))
     if paused:
-        p = MENU_FONT_SUB.render('PAUSED', True, (235, 190, 70))
+        p = MENU_FONT_SUB.render('PAUSED', True, COLOR_ON)
         screen.blit(p, (win_w - p.get_width() - 12, 12))
 
 
@@ -2599,7 +2660,6 @@ def _draw_tutorial() -> None:
     global _tut_scroll, _tut_content_h
     TUTORIAL_SECTIONS = build_tutorial_sections()
     _draw_ambient_menu(pygame.time.get_ticks())
-    _draw_menu_scrim()
     win_w, win_h = screen.get_size()
     title = MENU_FONT_BTN.render('Help', True, COLOR_ON)
     screen.blit(title, (win_w // 2 - title.get_width() // 2, 22))
@@ -2619,9 +2679,15 @@ def _draw_tutorial() -> None:
     inner_w = panel_w - 48
     sec_line = 44
     body_line = 28
+    # 教程换行：按完整句子拆行，一句占一行（不再按字符数硬折，避免把句子截断）
+    TUTORIAL_SECTIONS = [
+        (sec, [(k, _tutorial_wrap(t)) for k, t in rows])
+        for sec, rows in TUTORIAL_SECTIONS
+    ]
+
     total_h = 0
     for _, rows in TUTORIAL_SECTIONS:
-        total_h += sec_line + body_line * len(rows) + 12
+        total_h += sec_line + body_line * sum(len(ls) for _k, ls in rows) + 12
     _tut_content_h = total_h
     view_h = panel_h - 32
     _tut_scroll = max(0, min(_tut_scroll, max(0, total_h - view_h)))
@@ -2632,15 +2698,16 @@ def _draw_tutorial() -> None:
     for sec, rows in TUTORIAL_SECTIONS:
         canvas.blit(MENU_FONT_SEC.render(sec, True, COLOR_ON), (0, y))
         y += sec_line
-        for key, text in rows:
-            if key and key in ICONS:
-                ic = pygame.transform.scale(ICONS[key][0], (22, 22)).copy()
-                ic.set_alpha(210)
-                canvas.blit(ic, (0, y + 2))
-                canvas.blit(MENU_FONT_BODY.render(text, True, COLOR_OFF), (30, y))
-            else:
-                canvas.blit(MENU_FONT_BODY.render(text, True, COLOR_OFF), (0, y))
-            y += body_line
+        for key, lines in rows:
+            has_icon = bool(key) and key in ICONS
+            for li, ln in enumerate(lines):
+                canvas.blit(MENU_FONT_BODY.render(ln, True, COLOR_OFF),
+                            (30 if has_icon else 0, y))
+                if li == 0 and has_icon:
+                    ic = pygame.transform.scale(ICONS[key][0], (22, 22)).copy()
+                    ic.set_alpha(210)
+                    canvas.blit(ic, (0, y + 2))
+                y += body_line
         y += 12
 
     clip = pygame.Rect(panel_x + 24, panel_y + 16, inner_w, view_h)
@@ -2809,7 +2876,6 @@ def _theme_option_rects():
 def _draw_settings() -> None:
     """设置页：主界面/教学页同款氛围背景 + 中央半透明面板；顶部两个子菜单（主题 / 键位）。"""
     _draw_ambient_menu(pygame.time.get_ticks())
-    _draw_menu_scrim()
     win_w, win_h, panel_x, panel_y, panel_w, panel_h = _settings_layout()
     title = MENU_FONT_BTN.render('Settings', True, COLOR_ON)
     screen.blit(title, (win_w // 2 - title.get_width() // 2, 22))
@@ -2882,7 +2948,7 @@ def _draw_settings_keys(panel_x, panel_y, panel_w, panel_h) -> None:
         screen.blit(lab, (rect.x + 12, rect.centery - lab.get_height() // 2))
         chip = _key_row_label_rect(rect)
         if active:
-            cap = MENU_FONT_BODY.render('press key...', True, (235, 190, 70))
+            cap = MENU_FONT_BODY.render('press key...', True, COLOR_ON)
             screen.blit(cap, (chip.x, chip.centery - cap.get_height() // 2))
         else:
             kl = _key_label(KEYMAP[aid])
@@ -2895,19 +2961,10 @@ def _draw_settings_keys(panel_x, panel_y, panel_w, panel_h) -> None:
             screen.blit(kt, (chip.centerx - kt.get_width() // 2,
                              chip.centery - kt.get_height() // 2))
     screen.set_clip(prev_clip)
-    if total_h > view_h:
-        track_x = panel_x + panel_w - 22
-        track = pygame.Rect(track_x, top, 8, view_h)
-        pygame.draw.rect(screen, _tint(COLOR_ON, 28), track, border_radius=4)
-        thumb_h = max(30, int(view_h * view_h / total_h))
-        ratio = settings_scroll / max(1, total_h - view_h)
-        thumb_y = top + int((view_h - thumb_h) * ratio)
-        pygame.draw.rect(screen, COLOR_ON, (track_x, thumb_y, 8, thumb_h),
-                         border_radius=4)
     if settings_listen is not None:
         hint = MENU_FONT_SUB.render(
             'Press a new key to bind  Backspace reset  Esc cancel',
-            True, (235, 190, 70))
+            True, COLOR_ON)
     else:
         hint = MENU_FONT_SUB.render(
             'Click a row, then press a key to rebind  conflicts auto-swap',
@@ -2988,7 +3045,7 @@ def handle_settings_event(event) -> None:
 
 _PERF: Dict[str, float] = {'solve_ms': 0.0}
 perf_visible = False
-PERF_FONT = pygame.font.SysFont('consolas,menlo,monospace', 14)
+PERF_FONT = _load_font(14)
 
 def _draw_perf_panel() -> None:
     """左上角半透明读数框：FPS、每刻求解耗时(ms)、当前元件数、撤销栈深/上限。"""
