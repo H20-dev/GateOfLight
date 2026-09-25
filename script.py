@@ -1,4 +1,3 @@
-
 """GateOfLight —— 光路逻辑沙盒 (Light-based Logic Sandbox)
 
 一个用 pygame 编写的单机沙盒游戏：在近乎无限的可缩放网格上摆放光学元件，让激光束
@@ -33,6 +32,7 @@ import json
 import os
 import random
 import sys
+import tempfile
 import time
 from collections import deque
 from dataclasses import dataclass, field
@@ -77,9 +77,9 @@ MAX_STEPS_PER_ROUND = 1000000
 MAX_TRACE_SEGMENTS = 1000000
 TRACE_TIME_LIMIT_S = 0.30
 
-DELAY_LINE_DEFAULT_TICKS = 3
+DELAY_LINE_DEFAULT_TICKS = 1
 DELAY_LINE_MIN_TICKS, DELAY_LINE_MAX_TICKS = 1, 12
-TICK_INTERVAL_S = 0.1
+TICK_INTERVAL_S = 0.25
 TICK_DISPLAY_WRAP = 100
 
 ICON_SIZE = BASE_CELL_SIZE
@@ -238,11 +238,17 @@ PERSIST_FIELDS = {
     'delay_line': ('dir', 'ticks'),
 }
 
-if getattr(sys, 'frozen', False):
-    BASE_DIR = os.path.dirname(sys.executable)
-else:
-    BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+def _resolve_base_dir() -> str:
+    """程序根目录：打包(frozen)后取 exe 所在目录，直接跑源码时取脚本所在目录。
+    存档与设置固定写入该目录下的 saves/，不做任何备选目录兜底——
+    若该目录不可写（如放进 Program Files），存档会直接失败并给出提示，
+    由用户自行把程序移到可写位置。"""
+    if getattr(sys, 'frozen', False):
+        return os.path.dirname(sys.executable)
+    return os.path.dirname(os.path.abspath(__file__))
 
+
+BASE_DIR = _resolve_base_dir()
 SAVE_DIR = os.path.join(BASE_DIR, "saves")
 SETTINGS_PATH = os.path.join(SAVE_DIR, "settings.json")
 
@@ -955,9 +961,11 @@ def _advance_latch_states(candidates: List[Coord], armed_latchs: Set[Coord]
 #======================================================================
     return flipped, armed
 
-def solve_tick(delay_line_seeds: List[RaySeed]) -> Tuple[List[Segment], List[Coord], bool]:
-    """解一次光路并收敛到不动点：一轮五步(清态->消化射线->与门AND->锁存上升沿->灯灭锁定)。
-    除延迟线外全为零刻延迟的组合逻辑。返回(光段, 全部延迟线坐标, 是否被预算截断)。"""
+def _solve_tick_iter(delay_line_seeds: List[RaySeed],
+                     deadline: List[float]) -> Iterator[Tuple[List[Segment], List[Coord], bool]]:
+    """把一次光路求解拆成可分帧续跑的状态机：与旧 solve_tick 逻辑完全等价，只是在射线
+    追踪循环里按 deadline 让出控制权——一帧跑不完下帧接着跑，消除单帧长时间阻塞。
+    跑完时以 return 交回 (光段, 延迟线坐标, 是否截断)。deadline=[时刻] 由驱动方逐帧刷新。"""
     global trace_note, timeline_present
     laser_on, emitting_latchs, latch_coords, delay_line_coords = _baseline_reset()
     timeline_present = bool(delay_line_coords)
@@ -970,6 +978,8 @@ def solve_tick(delay_line_seeds: List[RaySeed]) -> Tuple[List[Segment], List[Coo
     converged = False
     segments: List[Segment] = []
     for round_index in range(MAX_LIGHT_ROUNDS):
+        if time.perf_counter() >= deadline[0]:
+            yield
         used_rounds = round_index + 1
         if round_index:
             _incremental_reset(ctx, dark, lit_and_gates)
@@ -979,6 +989,8 @@ def solve_tick(delay_line_seeds: List[RaySeed]) -> Tuple[List[Segment], List[Coo
         ctx.deadline = time.perf_counter() + TRACE_TIME_LIMIT_S
         while ctx.pending and not ctx.aborted:
             _trace_one_ray(ctx)
+            if time.perf_counter() >= deadline[0]:
+                yield
         if ctx.aborted:
             trace_note = 'TRUNC r%d %s (rays %d steps %d segs %d)' % (
                 used_rounds, ctx.abort_reason, ctx.rays, ctx.steps, len(segments))
@@ -1019,6 +1031,79 @@ def solve_tick(delay_line_seeds: List[RaySeed]) -> Tuple[List[Segment], List[Coo
     _touched_and.clear()
     _touched_and.update(ctx.touched_and_gates)
     return segments, delay_line_coords, ctx.aborted
+
+
+def solve_tick(delay_line_seeds: List[RaySeed]) -> Tuple[List[Segment], List[Coord], bool]:
+    """同步跑完一次求解（编辑/即时反馈路径用）：内部驱动 _solve_tick_iter 到完成。
+    逻辑与分帧版完全一致，只是不设每帧预算、一次性算到底。"""
+    gen = _solve_tick_iter(delay_line_seeds, [float('inf')])
+    while True:
+        try:
+            next(gen)
+        except StopIteration as stop:
+            return stop.value
+
+
+#======================================================================
+#  方案 E：时序求解分帧摊销——把每刻的全量 solve 摊到多帧，抹平单帧帧率尖峰
+#======================================================================
+SOLVE_SLICE_BUDGET_S = 0.006   # 每帧最多分给 solve 的时间预算(秒)，超出即交回主循环渲染
+
+
+class _SolveJob:
+    """一次正在分帧续跑的求解任务：持有生成器、逐帧刷新的让出时刻、以及收尾所需信息。"""
+    __slots__ = ('gen', 'deadline', 'advance', 'coords')
+
+    def __init__(self, advance: bool):
+        coords = _delay_line_coords()
+        seeds = [(row, col, d) for (row, col) in sorted(coords)
+                 for d in (grid_data[(row, col)].get('out_ready') or ())]
+        self.deadline = [0.0]
+        self.gen = _solve_tick_iter(seeds, self.deadline)
+        self.advance = advance
+        self.coords = coords
+
+
+_pending_solve: Optional[_SolveJob] = None
+
+
+def _start_sliced_solve(advance: bool) -> None:
+    """开一个分帧求解任务。若已有在途任务，直接作废重来——世界可能已变，旧结果作废。"""
+    global _pending_solve
+    _pending_solve = _SolveJob(advance=advance)
+
+
+def _finalize_sliced_solve(job: _SolveJob, segments: List[Segment],
+                           aborted: bool) -> List[Segment]:
+    """分帧任务跑完后的收尾：与 step_tick 后半段等价——按 advance 决定是否推延迟线与刻号。"""
+    global tick_index, tick_note
+    if aborted:
+        tick_note = 'aborted'
+        return segments
+    if not job.advance:
+        tick_note = 'paused'
+        return segments
+    _advance_delay_lines(job.coords)
+    tick_note = ''
+    tick_index = (tick_index + 1) % TICK_DISPLAY_WRAP
+    return segments
+
+
+def _drive_sliced_solve() -> Optional[List[Segment]]:
+    """本帧最多喂 SOLVE_SLICE_BUDGET_S 给正在续跑的求解任务。
+    跑完则返回最终光段并触发收尾；没跑完返回 None，下帧继续。"""
+    global _pending_solve
+    job = _pending_solve
+    if job is None:
+        return None
+    job.deadline[0] = time.perf_counter() + SOLVE_SLICE_BUDGET_S
+    try:
+        next(job.gen)
+    except StopIteration as stop:
+        segments, _dlc, aborted = stop.value
+        _pending_solve = None
+        return _finalize_sliced_solve(job, segments, aborted)
+    return None
 
 
 def _delay_line_ticks(data: dict) -> int:
@@ -1995,7 +2080,7 @@ def save_slot(slot: int) -> bool:
         return False
     world_dirty = False
     last_slot = slot
-    _note('saved slot %d  (%d cells)' % (slot, len(grid_data)))
+    _note('saved slot %d  (%d cells) -> %s' % (slot, len(grid_data), SAVE_DIR))
     _refresh_slot_status()
     return True
 
@@ -2341,27 +2426,27 @@ def _draw_ambient_menu(t_ms) -> None:
 def _start_button_rect() -> pygame.Rect:
     """Start 按钮矩形：水平居中，位于标题下方，尺寸固定，跟随窗口尺寸。"""
     win_w, win_h = screen.get_size()
-    btn_w, btn_h = 220, 64
-    return pygame.Rect(win_w // 2 - btn_w // 2, win_h // 2 + 30, btn_w, btn_h)
+    btn_w, btn_h = 320, 64
+    return pygame.Rect(win_w // 2 - btn_w // 2, win_h // 2 - 30, btn_w, btn_h)
 
 def _tutorial_button_rect() -> pygame.Rect:
     """教学按钮矩形：水平居中，位于 Start 按钮正下方，跟随窗口尺寸。"""
     win_w, win_h = screen.get_size()
-    btn_w, btn_h = 220, 64
-    return pygame.Rect(win_w // 2 - btn_w // 2, win_h // 2 + 120, btn_w, btn_h)
+    btn_w, btn_h = 320, 64
+    return pygame.Rect(win_w // 2 - btn_w // 2, win_h // 2 + 60, btn_w, btn_h)
 
 def _settings_button_rect() -> pygame.Rect:
     """设置按钮矩形：水平居中，位于 Tutorial 按钮正下方，跟随窗口尺寸。"""
     win_w, win_h = screen.get_size()
-    btn_w, btn_h = 220, 64
-    return pygame.Rect(win_w // 2 - btn_w // 2, win_h // 2 + 210, btn_w, btn_h)
+    btn_w, btn_h = 320, 64
+    return pygame.Rect(win_w // 2 - btn_w // 2, win_h // 2 + 150, btn_w, btn_h)
 
 def _draw_menu_scrim() -> None:
     """主界面中央柔光暗底：在氛围背景之上、标题/副标题/Start 按钮之下铺一条竖向渐隐的暗带，
     使随机刷新的暗色元件即使摆到中央也不会压住文字与按钮（替代旧的中央保留区方案）。
     竖向 alpha 由中心向上下两侧线性淡出到 0，边缘无硬边；纯现算色，不新增色常量。"""
     win_w, win_h = screen.get_size()
-    cy = win_h // 2 - 40
+    cy = win_h // 2 - 70
     band = max(120, int(win_h * 0.30))
     r, g, b = COLOR_BG
     scrim = pygame.Surface((win_w, 2 * band), pygame.SRCALPHA)
@@ -2375,14 +2460,12 @@ def _draw_menu_scrim() -> None:
 
 
 def draw_menu() -> None:
-    """启动界面：程序化氛围背景 + 居中 GateOfLight 标题 + 副标题 + Start 按钮 + 操作提示。"""
+    """启动界面：程序化氛围背景 + 居中 GateOfLight 标题 + Start/Tutorial/Settings 按钮 + 操作提示。"""
     _draw_ambient_menu(pygame.time.get_ticks())
     _draw_menu_scrim()
     win_w, win_h = screen.get_size()
     title = MENU_FONT_TITLE.render('GateOfLight', True, COLOR_ON)
-    screen.blit(title, (win_w // 2 - title.get_width() // 2, win_h // 2 - 150))
-    sub = MENU_FONT_SUB.render('Light-based Logic Sandbox', True, COLOR_OFF)
-    screen.blit(sub, (win_w // 2 - sub.get_width() // 2, win_h // 2 - 30))
+    screen.blit(title, (win_w // 2 - title.get_width() // 2, win_h // 2 - 185))
     for rect, label in ((_start_button_rect(), 'Start'), (_tutorial_button_rect(), 'Tutorial'), (_settings_button_rect(), 'Settings')):
         hovered = rect.collidepoint(pygame.mouse.get_pos())
         bg = pygame.Surface((rect.w, rect.h), pygame.SRCALPHA)
@@ -2924,18 +3007,18 @@ def _draw_perf_panel() -> None:
     for i, line in enumerate(lines):
         screen.blit(PERF_FONT.render(line, True, COLOR_ON), (10 + pad, 10 + pad + i * line_h))
 #======================================================================
-#  主循环 main：固定 120 FPS 的 事件 -> 推进 -> 渲染
+#  主循环 main：固定 60 FPS 的 事件 -> 推进 -> 渲染
 #======================================================================
 
 
 def main():
-    """固定 120 FPS：收事件 -> 平移 -> 按需推进时序 -> 渲染并翻页。"""
-    global grid_changed, cached_ray_segments, minimap_dirty
+    """固定 60 FPS：收事件 -> 平移 -> 按需推进时序 -> 渲染并翻页。"""
+    global grid_changed, cached_ray_segments, minimap_dirty, _pending_solve
     running = True
     last_tick_at = time.perf_counter()
     _prev_esc_active = False
     while running:
-        dt = min(clock.tick(120) / 1000.0, MAX_FRAME_DT_S)
+        dt = min(clock.tick(60) / 1000.0, MAX_FRAME_DT_S)
         _events = pygame.event.get()
         _got_event = bool(_events)
         for event in _events:
@@ -2968,23 +3051,35 @@ def main():
             delete_erase_at_cursor()
         if place_held:
             place_at_cursor()
-        need_solve = grid_changed
+        # 编辑(grid_changed)：当场一次性解完，保证放置/擦除的即时反馈。
+        # 时序推进(timeline)：改为分帧摊销，把每刻全量 solve 摊到多帧，抹平帧率尖峰。
+        solved_this_frame = False
         if grid_changed:
             grid_changed = False
             last_tick_at = time.perf_counter()
-        elif timeline_present and not paused:
-            if time.perf_counter() - last_tick_at >= TICK_INTERVAL_S:
-                need_solve = True
-                last_tick_at = time.perf_counter()
-        if need_solve:
+            _pending_solve = None      # 作废在途的时序任务，避免脏结果
             _solve_t0 = time.perf_counter()
             cached_ray_segments = step_tick(advance=not paused)
             _PERF['solve_ms'] = (time.perf_counter() - _solve_t0) * 1000.0
             minimap_dirty = True
+            solved_this_frame = True
+        elif timeline_present and not paused:
+            if _pending_solve is None and \
+                    time.perf_counter() - last_tick_at >= TICK_INTERVAL_S:
+                _start_sliced_solve(advance=True)
+                last_tick_at = time.perf_counter()
+        if _pending_solve is not None:
+            _solve_t0 = time.perf_counter()
+            _seg = _drive_sliced_solve()
+            _PERF['solve_ms'] = (time.perf_counter() - _solve_t0) * 1000.0
+            if _seg is not None:
+                cached_ray_segments = _seg
+                minimap_dirty = True
+                solved_this_frame = True
         cam_moved = (camera_x, camera_y, zoom) != prev_cam
         esc_active = _game_esc_time > 0 and \
                      pygame.time.get_ticks() - _game_esc_time < _ESC_RETURN_WIN
-        scene_dirty = (_got_event or cam_moved or need_solve or
+        scene_dirty = (_got_event or cam_moved or solved_this_frame or
                        delete_held or place_held or perf_visible or
                        esc_active or esc_active != _prev_esc_active)
         _prev_esc_active = esc_active
