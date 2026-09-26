@@ -1,3 +1,4 @@
+
 """GateOfLight —— 光路逻辑沙盒 (Light-based Logic Sandbox)
 
 一个用 pygame 编写的单机沙盒游戏：在近乎无限的可缩放网格上摆放光学元件，让激光束
@@ -5,10 +6,10 @@
 
 核心元件（见 TOOL_TYPES）：
     wall        墙体        -- 阻挡光线
-    laser       激光源      -- 沿朝向发出光束（可开关）
+    laser       激光源      -- 沿朝向发出光束（可开关）（NOT门）
     mirror      反射镜      -- 按 "/" 或 "\" 朝向改变光路方向
     splitter    分束器      -- 一束光分成透射 + 反射两路
-    coupler     耦合器      -- 光路交叉 / 合束的连通元件
+    coupler     耦合器      -- 光路交叉 / 合束的连通元件（OR门）
     and_gate    光与门      -- 信号光与控制光同时点亮才导通（组合逻辑 AND）
     latch       光锁存器    -- 带上升沿状态的记忆元件（1-bit 存储）
     delay_line  延迟线      -- 注入光延迟 n 刻后放出，引入时序维度
@@ -22,13 +23,14 @@ AND 判定 -> 锁存上升沿 -> 灯灭锁定），再由 _advance_delay_lines()
     追踪与求解 / 场景渲染 / 小地图 / HUD / 编辑操作 / 相机 / 事件分发 /
     存档读档 / 撤销重做 / 主菜单 / 教程 / 设置页 / 主循环
 
-运行：python 灵.txt（或改名为 .py）即可启动；打包见项目 README。
+运行：script.py即可启动；打包见项目 README。
 存档与设置固定写入可执行文件同级的 saves/ 目录（见 BASE_DIR 判定）。
 """
 
 # ── 标准库 ──────────────────────────────────────────────
 import bisect
 import copy
+import ctypes
 import json
 import os
 import random
@@ -46,11 +48,10 @@ pygame.init()
 # 让 Windows 任务栏正确显示自定义图标（与 exe 图标解耦，仅 win32 生效）
 if sys.platform == "win32":
     try:
-        import ctypes
-        ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID("GateOfLight")
+        windll = getattr(ctypes, "windll")
+        windll.shell32.SetCurrentProcessExplicitAppUserModelID("GateOfLight")
     except Exception:
         pass
-
 
 COLOR_ON = (100, 149, 237)
 COLOR_OFF = (105, 105, 105)
@@ -79,11 +80,11 @@ MIN_ZOOM, MAX_ZOOM, ZOOM_STEP = 0.4, 5.0, 0.1
 PAN_SPEED_PX = 500
 MAX_FRAME_DT_S = 0.05
 
-MAX_RAY_STEPS = 10000
-MAX_LIGHT_ROUNDS = 10000
-MAX_RAYS_PER_ROUND = 10000
-MAX_STEPS_PER_ROUND = 10000
-MAX_TRACE_SEGMENTS = 10000
+MAX_RAY_STEPS = 100000
+MAX_LIGHT_ROUNDS = 100000
+MAX_RAYS_PER_ROUND = 100000
+MAX_STEPS_PER_ROUND = 100000
+MAX_TRACE_SEGMENTS = 100000
 TRACE_TIME_LIMIT_S = 0.05
 
 DELAY_LINE_DEFAULT_TICKS = 1
@@ -129,7 +130,7 @@ _MENU_DECOR_STEP_MS = 240
 _MENU_DECOR_FADE_MS = 520
 
 
-KEY_TOOL_BASE = pygame.K_0
+KEY_TOOL_BASE = pygame.K_1
 KEY_ROTATE_ELEMENT = pygame.K_q
 KEY_CYCLE_PLACE_ROT = pygame.K_e
 KEY_TOGGLE_SWITCH = pygame.K_f
@@ -155,10 +156,10 @@ KEY_PAN_DOWN_ALT = pygame.K_s
 
 
 _DEFAULT_KEYS = {
-    'tool_0': pygame.K_0, 'tool_1': pygame.K_1,
-    'tool_2': pygame.K_2, 'tool_3': pygame.K_3,
-    'tool_4': pygame.K_4, 'tool_5': pygame.K_5,
-    'tool_6': pygame.K_6, 'tool_7': pygame.K_7,
+    'tool_0': pygame.K_1, 'tool_1': pygame.K_2,
+    'tool_2': pygame.K_3, 'tool_3': pygame.K_4,
+    'tool_4': pygame.K_5, 'tool_5': pygame.K_6,
+    'tool_6': pygame.K_7, 'tool_7': pygame.K_8,
     'undo': KEY_UNDO,
     'redo': KEY_REDO,
     'rotate': KEY_ROTATE_ELEMENT,
@@ -396,7 +397,6 @@ def _rebuild_indices() -> None:
                         and (d.get('is_lit') or d.get('axis_inputs') or d.get('perp_inputs')))
 current_tool = 1
 place_rot = 0
-eraser_mode = False
 grid_changed = True
 cached_ray_segments: List[Segment] = []
 paused = False
@@ -416,24 +416,222 @@ TOOL_SPECS = {
     'delay_line': lambda: {'type': 'delay_line', 'dir': 0, 'ticks': delay_line_setting,
                       'is_lit': False, 'inject': set(), 'pipe': [], 'out_ready': ()},
 }
-TOOL_DISPLAY = ['Wall', 'Laser', 'Mirror', 'Splitter', 'Coupler', 'AND Gate', 'Latch',
-                'Delay Line']
-TOOL_NAMES = ['%d %s' % (i, name) for i, name in enumerate(TOOL_DISPLAY)]
-KEY_ACTION_LABELS = (
-    [('tool_%d' % i, 'Select tool   %s' % TOOL_NAMES[i])
-     for i in range(len(TOOL_TYPES))]
-    + [('undo', 'Undo'), ('redo', 'Redo'),
-       ('rotate', 'Rotate element'), ('cycle_rot', 'Cycle place rotation'),
-       ('toggle_switch', 'Toggle switch / power'), ('minimap', 'Toggle minimap'),
-       ('paste', 'Stamp-paste slot'), ('pause', 'Pause / resume'),
-       ('perf', 'Toggle perf panel')]
-    + [('save_1', 'Save')]
-    + [('load', 'Load'), ('pan_up', 'Pan up'), ('pan_down', 'Pan down'),
-       ('pan_left', 'Pan left'), ('pan_right', 'Pan right'),
-       ('pan_up_alt', 'Pan up  (alt)'), ('pan_down_alt', 'Pan down  (alt)'),
-       ('pan_left_alt', 'Pan left  (alt)'), ('pan_right_alt', 'Pan right  (alt)'),
-       ('zoom_in', 'Zoom in'), ('zoom_out', 'Zoom out')]
-)
+_LANG = 'en'
+_LANG_LABELS = {'en': 'English', 'zh': '简体中文'}
+# 双语词条表：内部 id / 存档字段 / 物理键名一律不收进，只收给人看的字符串。
+TEXTS = {
+    'en': {
+        'tool.wall': 'Wall', 'tool.laser': 'Laser', 'tool.mirror': 'Mirror',
+        'tool.splitter': 'Splitter', 'tool.coupler': 'Coupler', 'tool.and_gate': 'AND Gate',
+        'tool.latch': 'Latch', 'tool.delay_line': 'Delay Line',
+        'ui.view_info': 'center {r},{c}  zoom {z}x',
+        'key.select_tool': 'Select tool   {name}',
+        'key.undo': 'Undo', 'key.redo': 'Redo',
+        'key.rotate': 'Rotate element', 'key.cycle_rot': 'Cycle place rotation',
+        'key.toggle_switch': 'Toggle switch / power', 'key.minimap': 'Toggle minimap',
+        'key.paste': 'Stamp-paste slot', 'key.pause': 'Pause / resume',
+        'key.perf': 'Toggle perf panel', 'key.save_1': 'Save', 'key.load': 'Load',
+        'key.pan_up': 'Pan up', 'key.pan_down': 'Pan down',
+        'key.pan_left': 'Pan left', 'key.pan_right': 'Pan right',
+        'key.pan_up_alt': 'Pan up  (alt)', 'key.pan_down_alt': 'Pan down  (alt)',
+        'key.pan_left_alt': 'Pan left  (alt)', 'key.pan_right_alt': 'Pan right  (alt)',
+        'key.zoom_in': 'Zoom in', 'key.zoom_out': 'Zoom out',
+        'game.unsaved': 'Unsaved changes - press ESC again to return',
+        'game.back_menu': 'Press ESC again to return to menu',
+        'game.paused': 'PAUSED',
+        'menu.start': 'Start', 'menu.tutorial': 'Tutorial', 'menu.settings': 'Settings',
+        'menu.hint': 'Start / Enter / Space to begin    ESC x2 in game returns here',
+        'menu.quit_hint': 'Press ESC again to quit',
+        'tut.title': 'Help', 'tut.close': '[ESC] back to menu',
+        'tut.sec.play': 'HOW TO PLAY', 'tut.sec.elements': 'ELEMENTS', 'tut.sec.tips': 'TIPS',
+        'tut.play.place': 'LMB / Enter place   RMB / Del erase',
+        'tut.play.select': '{tools} select tools   {rot} / {cyc} rotate   wheel zoom',
+        'tut.play.move': '{pan} move   {alt} alt move   MMB drag',
+        'tut.play.undo': '{undo} undo  {redo} redo   {del_} erase',
+        'tut.play.save': '{save} save   {load} load   {paste} stamp-paste',
+        'tut.play.misc': '{minimap} toggle minimap   {pause} pause/resume',
+        'tut.play.esc': 'ESC x2 returns to menu   ESC quit from menu',
+        'tut.play.solver': 'solver recomputes only on change',
+        'tut.play.perf': '{perf} perf panel: FPS / solve ms / cells / undo depth',
+        'tut.play.hold': 'Hold Enter / Del to lay/erase a run; one {undo} undoes the whole run',
+        'tut.el.wall': 'Wall: solid block, does not conduct light',
+        'tut.el.laser': 'Laser: light source, emits a beam each tick along its dir',
+        'tut.el.mirror': 'Mirror: reflects 45 degrees, bends the beam by 90 degrees',
+        'tut.el.splitter': 'Splitter: splits one beam into pass-through + reflected',
+        'tut.el.coupler': 'Coupler: merges several beams toward one output',
+        'tut.el.and_gate': 'AND gate: lights output only when inputs are present',
+        'tut.el.latch': 'Latch: self-holds on/off, one bit of memory',
+        'tut.el.delay_line': 'Delay line: the only time element, stores N ticks then emits',
+        'tut.tip.solver': 'Light is solved within one tick; only delay line carries state',
+        'tut.tip.rotate': 'Element dir decides optics; misplaced? press {undo} to undo',
+        "tut.tip.corner": "Hotbar corner = each slot's own select-tool key",
+        'tut.tip.rebind': 'Rebind any key under Settings > Keybindings',
+        'set.tab.theme': 'Theme', 'set.tab.keys': 'Keybindings',
+        'set.tab.language': 'Language',
+        'set.active': 'Active: {name}',
+        'theme.dark': 'Dark', 'theme.light': 'Light', 'theme.high_contrast': 'High Contrast',
+        'set.keybind.listening': 'press key...',
+        'set.keybind.press': 'Press a new key to bind  Backspace reset  Esc cancel',
+        'set.keybind.hint': 'Click a row, then press a key to rebind  conflicts auto-swap',
+        'note.delay_preset': 'delay preset now {n} ticks',
+        'note.delay_now': 'delay now {n} ticks',
+        'note.delay_flush': 'delay line flushed',
+        'note.save_fail': 'save slot {slot} FAILED: {err}',
+        'note.saved': 'saved slot {slot}  ({cells} cells) -> {dir}',
+        'note.load_broken': 'slot {slot} BROKEN: {err}',
+        'note.loaded': 'loaded slot {slot}  ({cells} cells)',
+        'note.no_save': 'no save yet  (F1 to save)',
+        'note.paste_none': 'no save to paste  (F1 to save)',
+        'note.paste_broken': 'paste slot {slot} BROKEN: {err}',
+        'note.paste_empty': 'paste slot {slot} has no cell',
+        'note.paste_out': 'paste slot {slot} -> r{r},c{c}  all {n} cells out of world',
+        'note.pasted': 'pasted slot {slot} -> r{r},c{c}  +{cells} cells ({over} over, {out} out)',
+        'note.undo_nothing': 'nothing to {label}',
+        'note.undo_done': '{label}  {cells} cells ({now} cells now)',
+    },
+    'zh': {
+        'tool.wall': '墙', 'tool.laser': '激光', 'tool.mirror': '反射镜',
+        'tool.splitter': '分束器', 'tool.coupler': '耦合器',
+        'tool.and_gate': '光与门', 'tool.latch': '光锁存器',
+        'tool.delay_line': '延迟线',
+        'ui.view_info': '中心坐标 {r},{c}  缩放 {z}x',
+        'key.select_tool': '选择工具   {name}',
+        'key.undo': '撤销', 'key.redo': '重做',
+        'key.rotate': '旋转元件', 'key.cycle_rot': '切换放置朝向',
+        'key.toggle_switch': '切换开关 / 电源',
+        'key.minimap': '显示或隐藏小地图',
+        'key.paste': '图章粘贴存档',
+        'key.pause': '暂停或继续',
+        'key.perf': '显示或隐藏性能面板',
+        'key.save_1': '保存', 'key.load': '读取',
+        'key.pan_up': '上移', 'key.pan_down': '下移',
+        'key.pan_left': '左移', 'key.pan_right': '右移',
+        'key.pan_up_alt': '上移  (备用)', 'key.pan_down_alt': '下移  (备用)',
+        'key.pan_left_alt': '左移  (备用)', 'key.pan_right_alt': '右移  (备用)',
+        'key.zoom_in': '放大', 'key.zoom_out': '缩小',
+        'game.unsaved': '存在未保存的更改 —— 再按一次 ESC 返回',
+        'game.back_menu': '再按一次 ESC 返回主菜单',
+        'game.paused': '已暂停',
+        'menu.start': '开始', 'menu.tutorial': '教学', 'menu.settings': '设置',
+        'menu.hint': '开始 / 回车 / 空格 进入游戏    游戏内连按两次 ESC 返回此处',
+        'menu.quit_hint': '再按一次 ESC 退出程序',
+        'tut.title': '帮助', 'tut.close': '[ESC] 返回主菜单',
+        'tut.sec.play': '玩法', 'tut.sec.elements': '元件', 'tut.sec.tips': '提示',
+        'tut.play.place': '左键 / 回车 放置   右键 / Del 擦除',
+        'tut.play.select': '{tools} 选择工具   {rot} / {cyc} 旋转   滚轮缩放',
+        'tut.play.move': '{pan} 平移   {alt} 备用平移   中键拖拽',
+        'tut.play.undo': '{undo} 撤销  {redo} 重做   {del_} 擦除',
+        'tut.play.save': '{save} 保存   {load} 读取   {paste} 图章粘贴',
+        'tut.play.misc': '{minimap} 小地图   {pause} 暂停/继续',
+        'tut.play.esc': '连按两次 ESC 返回主菜单   主菜单按 ESC 退出程序',
+        'tut.play.solver': '求解器仅在场景改动时重新计算',
+        'tut.play.perf': '{perf} 性能面板：帧率 / 求解毫秒 / 元件数 / 撤销深度',
+        'tut.play.hold': '按住 回车 / Del 可连铺或连擦；一次 {undo} 即可撤销整段',
+        'tut.el.wall': '墙：实心方块，不透光',
+        'tut.el.laser': '激光：光源，每个刻沿朝向发出一束光',
+        'tut.el.mirror': '反射镜：以 45 度反射，使光束偏转 90 度',
+        'tut.el.splitter': '分束器：把一束光分为透射与反射两路',
+        'tut.el.coupler': '耦合器：把多束光汇聚到一个输出',
+        'tut.el.and_gate': '光与门：仅当两路输入都有光时才点亮输出',
+        'tut.el.latch': '光锁存器：自保持开或关，存储 1 个比特',
+        'tut.el.delay_line': '延迟线：唯一的时序元件，存储 N 刻后再发出',
+        'tut.tip.solver': '光路在一个刻内求解完毕；只有延迟线携带状态',
+        'tut.tip.rotate': '元件朝向决定光路；放错了？按 {undo} 撤销',
+        'tut.tip.corner': '快捷栏角标＝每个格子自身的选工具键',
+        'tut.tip.rebind': '在 设置 > 键位 中可以重新绑定任意按键',
+        'set.tab.theme': '主题', 'set.tab.keys': '键位', 'set.tab.language': '语言',
+        'set.active': '当前：{name}',
+        'theme.dark': '深色', 'theme.light': '浅色', 'theme.high_contrast': '高对比',
+        'set.keybind.listening': '请按键…',
+        'set.keybind.press': '按下一个新键以绑定  Backspace 重置  Esc 取消',
+        'set.keybind.hint': '点击一行后再按一个键即可重绑  冲突时自动互换',
+        'note.delay_preset': '延迟预设改为 {n} 刻',
+        'note.delay_now': '延迟改为 {n} 刻',
+        'note.delay_flush': '延迟线已排空',
+        'note.save_fail': '保存槽位 {slot} 失败：{err}',
+        'note.saved': '已保存槽位 {slot}（共 {cells} 个元件）-> {dir}',
+        'note.load_broken': '槽位 {slot} 已损坏：{err}',
+        'note.loaded': '已读取槽位 {slot}（共 {cells} 个元件）',
+        'note.no_save': '尚无存档（按 F1 保存）',
+        'note.paste_none': '没有可粘贴的存档（按 F1 保存）',
+        'note.paste_broken': '粘贴槽位 {slot} 已损坏：{err}',
+        'note.paste_empty': '粘贴槽位 {slot} 没有任何元件',
+        'note.paste_out': '粘贴槽位 {slot} -> 行{r}，列{c}  全部 {n} 个元件越界',
+        'note.pasted': '已粘贴槽位 {slot} -> 行{r}，列{c}  增加 {cells} 个元件（覆盖 {over}，越界 {out}）',
+        'note.undo_nothing': '没有可{label}的操作',
+        'note.undo_done': '{label}：{cells} 个元件（当前共 {now} 个）',
+    },
+}
+
+
+THEME_LABEL_KEYS = {
+    'Dark': 'theme.dark', 'Light': 'theme.light', 'High Contrast': 'theme.high_contrast',
+}
+
+
+def theme_display(name):
+    """返回主题的用户可见译名；未知主题原样返回其 id。"""
+    return trans(THEME_LABEL_KEYS.get(name, name))
+
+
+def trans(key, **kw):
+    """按当前语言取词条；缺失自动退回英文，再退回 key 本身；有占位符时做 format。"""
+    table = TEXTS.get(_LANG) or TEXTS['en']
+    s = table.get(key)
+    if s is None:
+        s = TEXTS['en'].get(key, key)
+    if kw:
+        try:
+            s = s.format(**kw)
+        except (KeyError, IndexError):
+            pass
+    return s
+
+
+def tool_display(i):
+    """第 i 个工具的可显示名称（随语言变化）。"""
+    return trans('tool.' + TOOL_TYPES[i])
+
+
+def tool_names():
+    """带序号的工具名列表。"""
+    return ['%d %s' % (i + 1, tool_display(i)) for i in range(len(TOOL_TYPES))]
+
+
+def build_key_action_labels():
+    """按当前语言重建可绑定动作的显示标签（切语言后须重算）。"""
+    names = tool_names()
+    return (
+        [('tool_%d' % i, trans('key.select_tool', name=names[i]))
+         for i in range(len(TOOL_TYPES))]
+        + [('undo', trans('key.undo')), ('redo', trans('key.redo')),
+           ('rotate', trans('key.rotate')), ('cycle_rot', trans('key.cycle_rot')),
+           ('toggle_switch', trans('key.toggle_switch')), ('minimap', trans('key.minimap')),
+           ('paste', trans('key.paste')), ('pause', trans('key.pause')),
+           ('perf', trans('key.perf'))]
+        + [('save_1', trans('key.save_1'))]
+        + [('load', trans('key.load')), ('pan_up', trans('key.pan_up')),
+           ('pan_down', trans('key.pan_down')),
+           ('pan_left', trans('key.pan_left')), ('pan_right', trans('key.pan_right')),
+           ('pan_up_alt', trans('key.pan_up_alt')), ('pan_down_alt', trans('key.pan_down_alt')),
+           ('pan_left_alt', trans('key.pan_left_alt')),
+           ('pan_right_alt', trans('key.pan_right_alt')),
+           ('zoom_in', trans('key.zoom_in')), ('zoom_out', trans('key.zoom_out'))]
+    )
+
+
+KEY_ACTION_LABELS = build_key_action_labels()
+
+
+def set_lang(lang):
+    """切换界面语言：更新 _LANG 并重建依赖语言的派生表 / 文本缓存。"""
+    global _LANG, KEY_ACTION_LABELS
+    if lang not in TEXTS:
+        return
+    _LANG = lang
+    KEY_ACTION_LABELS = build_key_action_labels()
+    _MM_INFO_CACHE.clear()
+    _MM_LABEL_CACHE.clear()
 
 trace_note = 'ok'
 
@@ -1336,17 +1534,39 @@ def draw_scene(ray_segments: List[Segment]) -> None:
     draw_minimap(ray_segments)
     draw_hotbar()
 
-# ---------------------------------------------------------------------------
-# 字体加载：统一使用系统 monospace 等宽字体
-# ---------------------------------------------------------------------------
+# 字体加载：优先使用内置思源黑体 SourceHanSansSC.otf（可正常渲染中文），
+# 缺失/加载失败时优雅退回系统等宽字体，保证任何环境都不因缺字体而崩溃。
+# 候选相对路径：先找 fonts/ 子目录，再找程序同级目录；均通过 resource_path
+# 定位，兼容 PyInstaller 打包（sys._MEIPASS）与源码直跑两种情况。
+_CN_FONT_CANDIDATES = (
+    os.path.join('fonts', 'SourceHanSansSC.otf'),
+    'SourceHanSansSC.otf',
+)
+_font_cache = {}
+
 def _load_font(size, bold=False):
-    """加载系统等宽字体（consolas/menlo/monospace）。
-    size 为像素字号，bold=True 时通过 set_bold 做算法加粗。"""
-    font = pygame.font.SysFont('consolas,menlo,monospace', size)
+    """加载字体：优先内置 SourceHanSansSC.otf，失败退回系统 monospace。
+    size 为像素字号，bold=True 时通过 set_bold 做算法加粗。
+    同一 (size, bold) 复用缓存，避免每次渲染重复解析 otf 文件。"""
+    key = (size, bool(bold))
+    font = _font_cache.get(key)
+    if font is not None:
+        return font
+    font = None
+    for rel in _CN_FONT_CANDIDATES:
+        path = resource_path(rel)
+        if os.path.exists(path):
+            try:
+                font = pygame.font.Font(path, size)
+                break
+            except Exception:
+                font = None
+    if font is None:
+        font = pygame.font.SysFont('consolas,menlo,monospace', size)
     if bold:
         font.set_bold(True)
+    _font_cache[key] = font
     return font
-
 
 MM_FONT = _load_font(12)
 
@@ -1513,7 +1733,8 @@ def draw_minimap(ray_segments) -> None:
     pygame.draw.line(screen, COLOR_ON, (center_x, center_y - MM_CROSS),
                      (center_x, center_y + MM_CROSS), 1)
     view_row, view_col = screen_to_grid(WINDOW_WIDTH / 2.0, WINDOW_HEIGHT / 2.0)
-    info, info_bg = _text(MM_FONT, 'view %d,%d  zoom %.1fx' % (view_row, view_col, zoom),
+    info, info_bg = _text(MM_FONT, trans('ui.view_info', r=view_row, c=view_col,
+                                         z='%.1f' % zoom),
                           _MM_INFO_CACHE, 64, (8, 2))
     screen.blit(info_bg, (rect.right - info.get_width() - 10, rect.bottom + 2))
     screen.blit(info, (rect.right - info.get_width() - 6, rect.bottom + 3))
@@ -1552,7 +1773,7 @@ def toggle_minimap() -> None:
 HOTBAR_FONT = _load_font(11)
 HOTBAR_NAME_FONT = _load_font(24)
 #======================================================================
-#  HUD：快捷栏、旋转/橡皮按钮与命中判定
+#  HUD：快捷栏、旋转按钮与命中判定
 #======================================================================
 HOTBAR_NUM_FONT  = _load_font(20, bold=True)
 
@@ -1576,13 +1797,11 @@ def hotbar_index_at(pos) -> Optional[int]:
             return i
     return None
 
-def _side_btn_rects() -> Tuple[pygame.Rect, pygame.Rect]:
-    """快捷栏左右两侧按钮矩形：左=旋转按钮，右=橡皮擦按钮。"""
+def _rotate_btn_rect() -> pygame.Rect:
+    """快捷栏左侧旋转按钮矩形。"""
     rects = _hotbar_rects()
-    first, last = rects[0], rects[-1]
-    rot = pygame.Rect(max(4, first.x - HOTBAR_GAP - HOTBAR_CELL), first.y, HOTBAR_CELL, HOTBAR_CELL)
-    era = pygame.Rect(last.right + HOTBAR_GAP, first.y, HOTBAR_CELL, HOTBAR_CELL)
-    return rot, era
+    first = rects[0]
+    return pygame.Rect(max(4, first.x - HOTBAR_GAP - HOTBAR_CELL), first.y, HOTBAR_CELL, HOTBAR_CELL)
 
 def _is_ui_pos(pos) -> bool:
     """光标是否压在任一 UI 上（小地图 / 快捷栏 / 左右侧键）——放置与擦除据此防穿透。"""
@@ -1590,8 +1809,7 @@ def _is_ui_pos(pos) -> bool:
         return True
     if hotbar_index_at(pos) is not None:
         return True
-    rot, era = _side_btn_rects()
-    return rot.collidepoint(pos)
+    return _rotate_btn_rect().collidepoint(pos)
 
 def _hotbar_icon_name(tool_type: str) -> str:
     """快捷栏图标取该元件的"亮态"贴图；墙无开态，直接取其单一贴图名。"""
@@ -1602,7 +1820,7 @@ def draw_hotbar() -> None:
     不再逐格显示元件名——把当前选中元件的名字用大号字居中画在整排图标的正上方。"""
     rects = _hotbar_rects()
     for i, rect in enumerate(rects):
-        selected = (i == current_tool) and not eraser_mode
+        selected = (i == current_tool)
         bg = pygame.Surface((rect.w, rect.h), pygame.SRCALPHA)
         bg.fill(_tint(COLOR_BG, 130))
         screen.blit(bg, rect.topleft)
@@ -1618,15 +1836,15 @@ def draw_hotbar() -> None:
         num = HOTBAR_NUM_FONT.render(key_str, True, num_col)
         screen.blit(shadow, (rect.x + 4, rect.y + 3))
         screen.blit(num,    (rect.x + 3, rect.y + 2))
-    label = HOTBAR_NAME_FONT.render('Eraser' if eraser_mode else TOOL_DISPLAY[current_tool], True, COLOR_ON)
-    rot_btn, _era = _side_btn_rects()
+    label = HOTBAR_NAME_FONT.render(tool_display(current_tool), True, COLOR_ON)
+    rot_btn = _rotate_btn_rect()
     lx = (rot_btn.x + rects[-1].right) // 2 - label.get_width() // 2
     ly = rects[0].top - label.get_height() - 4
     screen.blit(label, (lx, ly))
     _draw_rotate_btn()
 
 def _draw_ui_button(rect, active, draw_icon, label) -> None:
-    """快捷栏同款按钮绘制（旋转 / 橡皮擦按钮共用，与底部元件格子完全同一口径）：
+    """快捷栏同款按钮绘制（旋转按钮，与底部元件格子完全同一口径）：
     半透明底 -> 图标 -> 选中蓝粗框 / 未选灰细框 -> 左上角带阴影序号。
     draw_icon(active) 由调用方传入，只画图标本身；底 / 外框 / 序号统一在此处理。"""
     bg = pygame.Surface((rect.w, rect.h), pygame.SRCALPHA)
@@ -1644,7 +1862,7 @@ def _draw_ui_button(rect, active, draw_icon, label) -> None:
 def _draw_rotate_btn() -> None:
     """左侧旋转按钮：循环箭头图标；place_rot≠0 时高亮，提示放置朝向已预设旋转。
     底 / 外框 / 左上角序号一律走快捷栏同款 _draw_ui_button（序号为 E）。"""
-    rot, _ = _side_btn_rects()
+    rot = _rotate_btn_rect()
 
     def _icon(active):
         col = COLOR_ON if active else COLOR_OFF
@@ -1749,8 +1967,7 @@ def delete_erase_at_cursor() -> None:
 
 def place_at_cursor() -> None:
     """放置入口（右键 / Enter 长按）：光标压在快捷栏 / 左右侧键 / 小地图上时不穿透误放；
-    长按时每格只放一次——停在同一格下一帧跳过，避免每帧重复压撤销栈。
-    橡皮擦模式下放置动作等同于擦除。"""
+    长按时每格只放一次——停在同一格下一帧跳过，避免每帧重复压撤销栈。"""
     global _place_last_coord
     _mp = pygame.mouse.get_pos()
     if _is_ui_pos(_mp):
@@ -1758,10 +1975,7 @@ def place_at_cursor() -> None:
     coord = _cursor_coord()
     if coord == _place_last_coord:
         return
-    if eraser_mode:
-        erase_element()
-    else:
-        place_element()
+    place_element()
     _place_last_coord = coord
 
 def _cursor_coord() -> Coord:
@@ -1793,7 +2007,7 @@ def rotate_element(step: int) -> None:
         if new_setting == delay_line_setting:
             return
         delay_line_setting = new_setting
-        _note('delay preset now %d ticks' % delay_line_setting)
+        _note(trans('note.delay_preset', n=delay_line_setting))
         return
     if _etype(data) == 'delay_line':
         new_ticks = _delay_line_ticks(data)
@@ -1804,7 +2018,7 @@ def rotate_element(step: int) -> None:
         data['ticks'] = new_ticks
         data['pipe'] = []
         data['out_ready'] = ()
-        _note('delay now %d ticks' % new_ticks)
+        _note(trans('note.delay_now', n=new_ticks))
     else:
         push_undo([_cursor_coord()])
         data['dir'] = (data['dir'] + step) % 4
@@ -1835,7 +2049,7 @@ def toggle_switch() -> None:
         data['pipe'] = []
         data['out_ready'] = ()
         data['inject'] = set()
-        _note('delay line flushed')
+        _note(trans('note.delay_flush'))
     reset_timeline('toggle')
 #======================================================================
 #  相机控制：平移 / 缩放 / 回原点
@@ -1883,7 +2097,7 @@ def pan_camera(dt: float) -> None:
 def handle_event(event):
     """处理一个事件并派发到对应动作；返回 False 表示要退出主循环。"""
     global current_tool, WINDOW_WIDTH, WINDOW_HEIGHT, _minimap_dragging, is_dragging, delete_held, _mm_last_click_ms
-    global place_held, _place_last_coord, place_rot, eraser_mode
+    global place_held, _place_last_coord, place_rot
     global last_mouse_pos, screen_state, _game_esc_time, perf_visible, paused
     if event.type == pygame.QUIT:
         return False
@@ -1907,9 +2121,8 @@ def handle_event(event):
         if hb_idx is not None:
             if event.button == 1:
                 current_tool = hb_idx
-                eraser_mode = False
             return True
-        _rb, _eb = _side_btn_rects()
+        _rb = _rotate_btn_rect()
         if _rb.collidepoint(event.pos):
             if event.button == 1:
                 place_rot = (place_rot + 1) % 4
@@ -2141,11 +2354,11 @@ def save_slot(slot: int) -> bool:
             json.dump(serialize_world(), fh, ensure_ascii=False, separators=(',', ':'))
         os.replace(path + '.tmp', path)
     except OSError as exc:
-        _note('save slot %d FAILED: %s' % (slot, exc))
+        _note(trans('note.save_fail', slot=slot, err=exc))
         return False
     world_dirty = False
     last_slot = slot
-    _note('saved slot %d  (%d cells) -> %s' % (slot, len(grid_data), SAVE_DIR))
+    _note(trans('note.saved', slot=slot, cells=len(grid_data), dir=SAVE_DIR))
     _refresh_slot_status()
     return True
 
@@ -2195,7 +2408,7 @@ def load_slot(slot: int) -> bool:
     try:
         cells, doc = _read_slot(slot)
     except (ValueError, OSError, TypeError, AttributeError, FileNotFoundError) as exc:
-        _note('slot %d BROKEN: %s' % (slot, exc))
+        _note(trans('note.load_broken', slot=slot, err=exc))
         return False
     push_undo_replaced(grid_data, cells)
     grid_data = cells
@@ -2214,7 +2427,7 @@ def load_slot(slot: int) -> bool:
     last_slot = slot
     timeline_present = any(_etype(d) == 'delay_line' for d in cells.values())
     reset_timeline('load slot %d' % slot)
-    _note('loaded slot %d  (%d cells)' % (slot, len(grid_data)))
+    _note(trans('note.loaded', slot=slot, cells=len(grid_data)))
     _refresh_slot_status()
     grid_changed = minimap_dirty = True
     return True
@@ -2224,7 +2437,7 @@ def load_recent_slot() -> bool:
     """F4 读取：整盘替换为存档内容（相机与工具也跟着还原）。"""
     slot = _f4_target_slot()
     if not slot:
-        _note('no save yet  (F1 to save)')
+        _note(trans('note.no_save'))
         return False
     return load_slot(slot)
 
@@ -2241,15 +2454,15 @@ def paste_slot_at_cursor(slot: int = 0) -> bool:
     global grid_changed, minimap_dirty, world_dirty, last_slot
     target = slot if slot in SAVE_SLOTS else _f4_target_slot()
     if not target:
-        _note('no save to paste  (F1 to save)')
+        _note(trans('note.paste_none'))
         return False
     try:
         cells, _doc = _read_slot(target)
     except (ValueError, OSError, TypeError, AttributeError, FileNotFoundError) as exc:
-        _note('paste slot %d BROKEN: %s' % (target, exc))
+        _note(trans('note.paste_broken', slot=target, err=exc))
         return False
     if not cells:
-        _note('paste slot %d has no cell' % target)
+        _note(trans('note.paste_empty', slot=target))
         return False
     anchor_row, anchor_col = screen_to_grid(*pygame.mouse.get_pos())
     delta_row = anchor_row - min(row for row, _col in cells)
@@ -2262,8 +2475,7 @@ def paste_slot_at_cursor(slot: int = 0) -> bool:
         else:
             dropped += 1
     if not moved:
-        _note('paste slot %d -> r%d,c%d  all %d cells out of world' % (
-            target, anchor_row, anchor_col, dropped))
+        _note(trans('note.paste_out', slot=target, r=anchor_row, c=anchor_col, n=dropped))
         return False
     push_undo([coord for coord, _data in moved])
     pasted = covered = 0
@@ -2276,8 +2488,8 @@ def paste_slot_at_cursor(slot: int = 0) -> bool:
     reset_timeline('paste')
     world_dirty = True
     last_slot = target
-    _note('pasted slot %d -> r%d,c%d  +%d cells (%d over, %d out)' % (
-        target, anchor_row, anchor_col, pasted, covered, dropped))
+    _note(trans('note.pasted', slot=target, r=anchor_row, c=anchor_col,
+                cells=pasted, over=covered, out=dropped))
     _refresh_slot_status()
     grid_changed = minimap_dirty = True
     return True
@@ -2325,11 +2537,13 @@ def _apply_delta(entries: List[Tuple[Coord, Optional[dict]]]
     return reverse
 
 def _restore(stack: List[List[Tuple[Coord, Optional[dict]]]],
-             other: List[List[Tuple[Coord, Optional[dict]]]], label: str) -> bool:
-    """撤销 / 重做的公共部分：按格回滚、时序归零、把反向 delta 塞进对面那口栈（相机不动，免得视角乱跳）。"""
+             other: List[List[Tuple[Coord, Optional[dict]]]], label: str,
+             label_key: str) -> bool:
+    """撤销 / 重做的公共部分：按格回滚、时序归零、把反向 delta 塞进对面那口栈（相机不动，免得视角乱跳）。
+    label 为内部 id（供 reset_timeline 用），label_key 为对应词条 key（供界面提示用）。"""
     global grid_data, world_dirty, grid_changed, minimap_dirty
     if not stack:
-        _note('nothing to %s' % label)
+        _note(trans('note.undo_nothing', label=trans(label_key)))
         return False
     entries = stack.pop()
     other.append(_apply_delta(entries))
@@ -2337,17 +2551,17 @@ def _restore(stack: List[List[Tuple[Coord, Optional[dict]]]],
     del other[:-UNDO_LIMIT]
     reset_timeline(label)
     world_dirty = True
-    _note('%s  %d cells (%d cells now)' % (label, len(entries), len(grid_data)))
+    _note(trans('note.undo_done', label=trans(label_key), cells=len(entries), now=len(grid_data)))
     grid_changed = minimap_dirty = True
     return True
 
 def undo() -> bool:
     """Z 键：弹出撤销栈顶恢复到上一步，当前状态顺手压进重做栈。"""
-    return _restore(undo_stack, redo_stack, 'undo')
+    return _restore(undo_stack, redo_stack, 'undo', 'key.undo')
 
 def redo() -> bool:
     """X 键：把刚撤销掉的那一步放回去，同时重新压进撤销栈。"""
-    return _restore(redo_stack, undo_stack, 'redo')
+    return _restore(redo_stack, undo_stack, 'redo', 'key.redo')
 
 _refresh_slot_status()
 
@@ -2506,8 +2720,10 @@ def draw_menu() -> None:
     _draw_ambient_menu(pygame.time.get_ticks())
     win_w, win_h = screen.get_size()
     title = MENU_FONT_TITLE.render('GATE OF LIGHT', True, COLOR_ON)
-    screen.blit(title, (win_w // 2 - title.get_width() // 2, win_h // 2 - 185))
-    for rect, label in ((_start_button_rect(), 'Start'), (_tutorial_button_rect(), 'Tutorial'), (_settings_button_rect(), 'Settings')):
+    screen.blit(title, (win_w // 2 - title.get_width() // 2, win_h // 2 - 225))
+    for rect, label in ((_start_button_rect(), trans('menu.start')),
+                        (_tutorial_button_rect(), trans('menu.tutorial')),
+                        (_settings_button_rect(), trans('menu.settings'))):
         hovered = rect.collidepoint(pygame.mouse.get_pos())
         bg = pygame.Surface((rect.w, rect.h), pygame.SRCALPHA)
         bg.fill(_tint(COLOR_ON, 74 if hovered else 44))
@@ -2516,11 +2732,10 @@ def draw_menu() -> None:
         txt = MENU_FONT_BTN.render(label, True, COLOR_ON)
         screen.blit(txt, (rect.centerx - txt.get_width() // 2,
                           rect.centery - txt.get_height() // 2))
-    hint = MENU_FONT_SUB.render('Start / Enter / Space to begin    ESC x2 in game returns here',
-                                True, COLOR_OFF)
+    hint = MENU_FONT_SUB.render(trans('menu.hint'), True, COLOR_OFF)
     screen.blit(hint, (win_w - hint.get_width() - 16, win_h - hint.get_height() - 12))
     if _menu_esc_time and pygame.time.get_ticks() - _menu_esc_time < _ESC_RETURN_WIN:
-        warn = MENU_FONT_SUB.render('Press ESC again to quit', True, COLOR_ON)
+        warn = MENU_FONT_SUB.render(trans('menu.quit_hint'), True, COLOR_ON)
         screen.blit(warn, (win_w // 2 - warn.get_width() // 2, 12))
 
 def handle_menu_event(event) -> bool:
@@ -2563,42 +2778,37 @@ def build_tutorial_sections():
     save_rng = _key_label(KEYMAP['save_1'])
     tools_lbl = '/'.join(_key_label(KEYMAP['tool_%d' % i]) for i in range(len(TOOL_TYPES)))
     return [
-        ('HOW TO PLAY', [
-            ('', 'LMB / Enter place   RMB / Del erase'),
-            ('', '%s select tools   %s / %s rotate   wheel zoom' % (
-                tools_lbl, _key_label(KEYMAP['rotate']),
-                _key_label(KEYMAP['cycle_rot']))),
-            ('', '%s move   %s alt move   MMB drag' % (pan4, alt4)),
-            ('', '%s undo  %s redo   %s erase' % (
-                _key_label(KEYMAP['undo']), _key_label(KEYMAP['redo']),
-                _key_label(pygame.K_DELETE))),
-            ('', '%s save   %s load   %s stamp-paste' % (
-                save_rng, _key_label(KEYMAP['load']), _key_label(KEYMAP['paste']))),
-            ('', '%s toggle minimap   %s pause/resume' % (
-                _key_label(KEYMAP['minimap']), _key_label(KEYMAP['pause']))),
-            ('', 'ESC x2 returns to menu   ESC quit from menu'),
-            ('', 'solver recomputes only on change'),
-            ('', '%s perf panel: FPS / solve ms / cells / undo depth' % (
-                _key_label(KEYMAP['perf']))),
-            ('', 'Hold Enter / Del to lay/erase a run; one %s undoes the whole run' % (
-                _key_label(KEYMAP['undo']))),
+        (trans('tut.sec.play'), [
+            ('', trans('tut.play.place')),
+            ('', trans('tut.play.select', tools=tools_lbl,
+                       rot=_key_label(KEYMAP['rotate']), cyc=_key_label(KEYMAP['cycle_rot']))),
+            ('', trans('tut.play.move', pan=pan4, alt=alt4)),
+            ('', trans('tut.play.undo', undo=_key_label(KEYMAP['undo']),
+                       redo=_key_label(KEYMAP['redo']), del_=_key_label(pygame.K_DELETE))),
+            ('', trans('tut.play.save', save=save_rng, load=_key_label(KEYMAP['load']),
+                       paste=_key_label(KEYMAP['paste']))),
+            ('', trans('tut.play.misc', minimap=_key_label(KEYMAP['minimap']),
+                       pause=_key_label(KEYMAP['pause']))),
+            ('', trans('tut.play.esc')),
+            ('', trans('tut.play.solver')),
+            ('', trans('tut.play.perf', perf=_key_label(KEYMAP['perf']))),
+            ('', trans('tut.play.hold', undo=_key_label(KEYMAP['undo']))),
         ]),
-        ('ELEMENTS', [
-            ('wall', 'Wall: solid block, does not conduct light'),
-            ('laser_off', 'Laser: light source, emits a beam each tick along its dir'),
-            ('mirror_off', 'Mirror: reflects 45 degrees, bends the beam by 90 degrees'),
-            ('splitter_off', 'Splitter: splits one beam into pass-through + reflected'),
-            ('coupler_off', 'Coupler: merges several beams toward one output'),
-            ('and_gate_off', 'AND gate: lights output only when inputs are present'),
-            ('latch_off', 'Latch: self-holds on/off, one bit of memory'),
-            ('delay_line_off', 'Delay line: the only time element, stores N ticks then emits'),
+        (trans('tut.sec.elements'), [
+            ('wall', trans('tut.el.wall')),
+            ('laser_off', trans('tut.el.laser')),
+            ('mirror_off', trans('tut.el.mirror')),
+            ('splitter_off', trans('tut.el.splitter')),
+            ('coupler_off', trans('tut.el.coupler')),
+            ('and_gate_off', trans('tut.el.and_gate')),
+            ('latch_off', trans('tut.el.latch')),
+            ('delay_line_off', trans('tut.el.delay_line')),
         ]),
-        ('TIPS', [
-            ('', 'Light is solved within one tick; only delay line carries state'),
-            ('', 'Element dir decides optics; misplaced? press %s to undo' % (
-                _key_label(KEYMAP['undo']))),
-            ('', 'Hotbar corner = each slot\'s own select-tool key'),
-            ('', 'Rebind any key under Settings > Keybindings'),
+        (trans('tut.sec.tips'), [
+            ('', trans('tut.tip.solver')),
+            ('', trans('tut.tip.rotate', undo=_key_label(KEYMAP['undo']))),
+            ('', trans('tut.tip.corner')),
+            ('', trans('tut.tip.rebind')),
         ]),
     ]
 def _tutorial_wrap(text, _max_chars=None):
@@ -2611,7 +2821,7 @@ def _tutorial_wrap(text, _max_chars=None):
     cur = ''
     for ch in text:
         cur += ch
-        if ch in '.!?;':
+        if ch in '.!?;。！？；':
             lines.append(cur.strip())
             cur = ''
     if cur.strip():
@@ -2625,12 +2835,12 @@ def _draw_game_esc_hint() -> None:
     win_w, _ = screen.get_size()
     now = pygame.time.get_ticks()
     if now - _game_esc_time < _ESC_RETURN_WIN:
-        msg = 'Unsaved changes - press ESC again to return' if (world_dirty and grid_data) \
-            else 'Press ESC again to return to menu'
+        msg = trans('game.unsaved') if (world_dirty and grid_data) \
+            else trans('game.back_menu')
         t = MENU_FONT_SUB.render(msg, True, COLOR_ON)
         screen.blit(t, (win_w // 2 - t.get_width() // 2, 12))
     if paused:
-        p = MENU_FONT_SUB.render('PAUSED', True, COLOR_ON)
+        p = MENU_FONT_SUB.render(trans('game.paused'), True, COLOR_ON)
         screen.blit(p, (win_w - p.get_width() - 12, 12))
 
 
@@ -2661,10 +2871,9 @@ def _draw_tutorial() -> None:
     TUTORIAL_SECTIONS = build_tutorial_sections()
     _draw_ambient_menu(pygame.time.get_ticks())
     win_w, win_h = screen.get_size()
-    title = MENU_FONT_BTN.render('Help', True, COLOR_ON)
+    title = MENU_FONT_BTN.render(trans('tut.title'), True, COLOR_ON)
     screen.blit(title, (win_w // 2 - title.get_width() // 2, 22))
-    close_hint = MENU_FONT_SUB.render(
-        '[ESC] back to menu', True, COLOR_OFF)
+    close_hint = MENU_FONT_SUB.render(trans('tut.close'), True, COLOR_OFF)
     screen.blit(close_hint, (win_w // 2 - close_hint.get_width() // 2, win_h - 34))
 
     panel_w = min(760, win_w - 80)
@@ -2761,7 +2970,7 @@ def _apply_theme(name: str) -> None:
 def _save_settings() -> None:
     """把当前主题与键位写入脚本同级 settings.json（与 saves/ 存档分离）。失败静默。"""
     try:
-        payload = {'theme': current_theme,
+        payload = {'theme': current_theme, 'lang': _LANG,
                    'keys': {aid: KEYMAP.get(aid) for aid, _ in KEY_ACTION_LABELS}}
         os.makedirs(SAVE_DIR, exist_ok=True)
         with open(SETTINGS_PATH, 'w', encoding='utf-8') as f:
@@ -2777,6 +2986,9 @@ def _load_settings() -> None:
             theme = data.get('theme')
             if theme in THEMES:
                 _apply_theme(theme)
+            lang = data.get('lang')
+            if lang in TEXTS:
+                set_lang(lang)
             raw = data.get('keys')
             if isinstance(raw, dict):
                 for aid, _lab in KEY_ACTION_LABELS:
@@ -2798,16 +3010,21 @@ def _settings_layout():
 settings_tab = 'theme'
 settings_listen = None
 settings_scroll = 0.0
-_SETTINGS_TAB_LABELS = [('theme', 'Theme'), ('keys', 'Keybindings')]
+def settings_tab_labels():
+    """设置顶部子菜单标签（随语言变化）。"""
+    return [('theme', trans('set.tab.theme')), ('keys', trans('set.tab.keys')),
+            ('language', trans('set.tab.language'))]
 def _settings_tab_rects():
     """设置顶部两个子菜单按钮（主题 / 键位）的矩形。"""
     win_w, win_h, panel_x, panel_y, panel_w, panel_h = _settings_layout()
     inner_x = panel_x + 32
     inner_w = panel_w - 64
-    bw = (inner_w - 16) // 2
+    labels = settings_tab_labels()
+    n = max(1, len(labels))
+    bw = (inner_w - 16 * (n - 1)) // n
     y = panel_y + 70
     rects = []
-    for _i, (_tid, _lbl) in enumerate(_SETTINGS_TAB_LABELS):
+    for _i, (_tid, _lbl) in enumerate(labels):
         rects.append((_tid, pygame.Rect(inner_x + _i * (bw + 16), y, bw, 40)))
     return rects
 def _keys_metrics():
@@ -2877,14 +3094,13 @@ def _draw_settings() -> None:
     """设置页：主界面/教学页同款氛围背景 + 中央半透明面板；顶部两个子菜单（主题 / 键位）。"""
     _draw_ambient_menu(pygame.time.get_ticks())
     win_w, win_h, panel_x, panel_y, panel_w, panel_h = _settings_layout()
-    title = MENU_FONT_BTN.render('Settings', True, COLOR_ON)
+    title = MENU_FONT_BTN.render(trans('menu.settings'), True, COLOR_ON)
     screen.blit(title, (win_w // 2 - title.get_width() // 2, 22))
     panel = pygame.Surface((panel_w, panel_h), pygame.SRCALPHA)
     panel.fill(_tint(COLOR_BG, 226))
     screen.blit(panel, (panel_x, panel_y))
     pygame.draw.rect(screen, COLOR_ON, (panel_x, panel_y, panel_w, panel_h), 2)
-    mouse = pygame.mouse.get_pos()
-    label_map = dict(_SETTINGS_TAB_LABELS)
+    label_map = dict(settings_tab_labels())
     for tid, rect in _settings_tab_rects():
         active = (tid == settings_tab)
         bg = pygame.Surface((rect.w, rect.h), pygame.SRCALPHA)
@@ -2898,8 +3114,10 @@ def _draw_settings() -> None:
                           rect.centery - lab.get_height() // 2))
     if settings_tab == 'theme':
         _draw_settings_theme(panel_x, panel_y, panel_w, panel_h)
-    else:
+    elif settings_tab == 'keys':
         _draw_settings_keys(panel_x, panel_y, panel_w, panel_h)
+    else:
+        _draw_settings_language(panel_x, panel_y, panel_w, panel_h)
 def _draw_settings_theme(panel_x, panel_y, panel_w, panel_h) -> None:
     """主题子页：配色可选列表 + 当前主题色块。"""
     # head = MENU_FONT_SEC.render('THEME', True, COLOR_ON)
@@ -2911,7 +3129,7 @@ def _draw_settings_theme(panel_x, panel_y, panel_w, panel_h) -> None:
         screen.blit(bg, rect.topleft)
         pygame.draw.rect(screen, COLOR_ON if active else COLOR_OFF, rect,
                          3 if active else 2, border_radius=8)
-        label = MENU_FONT_SEC.render(name, True,
+        label = MENU_FONT_SEC.render(theme_display(name), True,
                                      COLOR_ON if active else COLOR_OFF)
         screen.blit(label, (rect.x + 24, rect.centery - label.get_height() // 2))
         sw = THEMES[name]
@@ -2925,7 +3143,7 @@ def _draw_settings_theme(panel_x, panel_y, panel_w, panel_h) -> None:
                              (sx, rect.centery - sw_size // 2, sw_size, sw_size), 1,
                              border_radius=4)
             sx += sw_size + 8
-    cur = MENU_FONT_SUB.render('Active: ' + current_theme, True, COLOR_OFF)
+    cur = MENU_FONT_SUB.render(trans('set.active', name=theme_display(current_theme)), True, COLOR_OFF)
     screen.blit(cur, (panel_x + 32, panel_y + panel_h - 34))
 def _draw_settings_keys(panel_x, panel_y, panel_w, panel_h) -> None:
     """键位子页：逐行展示可绑定动作 + 当前键；点一行进入监听态；内容超出时上下滚动。"""
@@ -2948,7 +3166,7 @@ def _draw_settings_keys(panel_x, panel_y, panel_w, panel_h) -> None:
         screen.blit(lab, (rect.x + 12, rect.centery - lab.get_height() // 2))
         chip = _key_row_label_rect(rect)
         if active:
-            cap = MENU_FONT_BODY.render('press key...', True, COLOR_ON)
+            cap = MENU_FONT_BODY.render(trans('set.keybind.listening'), True, COLOR_ON)
             screen.blit(cap, (chip.x, chip.centery - cap.get_height() // 2))
         else:
             kl = _key_label(KEYMAP[aid])
@@ -2962,14 +3180,41 @@ def _draw_settings_keys(panel_x, panel_y, panel_w, panel_h) -> None:
                              chip.centery - kt.get_height() // 2))
     screen.set_clip(prev_clip)
     if settings_listen is not None:
-        hint = MENU_FONT_SUB.render(
-            'Press a new key to bind  Backspace reset  Esc cancel',
-            True, COLOR_ON)
+        hint = MENU_FONT_SUB.render(trans('set.keybind.press'), True, COLOR_ON)
     else:
-        hint = MENU_FONT_SUB.render(
-            'Click a row, then press a key to rebind  conflicts auto-swap',
-            True, COLOR_OFF)
+        hint = MENU_FONT_SUB.render(trans('set.keybind.hint'), True, COLOR_OFF)
     screen.blit(hint, (panel_x + 32, panel_y + panel_h - 34))
+def _language_option_rects():
+    """语言子页：每种语言一行可点击矩形。"""
+    win_w, win_h, panel_x, panel_y, panel_w, panel_h = _settings_layout()
+    inner_x = panel_x + 32
+    inner_w = panel_w - 64
+    row_h, gap = 72, 18
+    y = panel_y + 150
+    rects = []
+    for lang in TEXTS:
+        rects.append((lang, pygame.Rect(inner_x, y, inner_w, row_h)))
+        y += row_h + gap
+    return rects
+
+
+def _draw_settings_language(panel_x, panel_y, panel_w, panel_h) -> None:
+    """语言子页：语言可选列表 + 当前语言。"""
+    for lang, rect in _language_option_rects():
+        active = (lang == _LANG)
+        bg = pygame.Surface((rect.w, rect.h), pygame.SRCALPHA)
+        bg.fill(_tint(COLOR_ON, 60 if active else 34))
+        screen.blit(bg, rect.topleft)
+        pygame.draw.rect(screen, COLOR_ON if active else COLOR_OFF, rect,
+                         3 if active else 2, border_radius=8)
+        label = MENU_FONT_SEC.render(_LANG_LABELS.get(lang, lang), True,
+                                     COLOR_ON if active else COLOR_OFF)
+        screen.blit(label, (rect.x + 24, rect.centery - label.get_height() // 2))
+    cur = MENU_FONT_SUB.render(trans('set.active', name=_LANG_LABELS.get(_LANG, _LANG)),
+                               True, COLOR_OFF)
+    screen.blit(cur, (panel_x + 32, panel_y + panel_h - 34))
+
+
 def handle_settings_event(event) -> None:
     """设置页事件：子菜单切换 / 主题切换写盘 / 键位监听重绑；ESC 返回。"""
     global screen_state, WINDOW_WIDTH, WINDOW_HEIGHT, _game_esc_time
@@ -3003,6 +3248,13 @@ def handle_settings_event(event) -> None:
                 if rect.collidepoint(event.pos):
                     if name != current_theme:
                         _apply_theme(name)
+                        _save_settings()
+                    return
+        elif settings_tab == 'language':
+            for lang, rect in _language_option_rects():
+                if rect.collidepoint(event.pos):
+                    if lang != _LANG:
+                        set_lang(lang)
                         _save_settings()
                     return
         else:
