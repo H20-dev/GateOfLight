@@ -1,4 +1,6 @@
 
+
+
 """GateOfLight —— 光路逻辑沙盒 (Light-based Logic Sandbox)
 
 一个用 pygame 编写的单机沙盒游戏：在近乎无限的可缩放网格上摆放光学元件，让激光束
@@ -20,7 +22,7 @@ AND 判定 -> 锁存上升沿 -> 灯灭锁定），再由 _advance_delay_lines()
 
 程序结构（自上而下的功能区块，均以分节横幅注释标出）：
     常量与主题 / 键位系统 / 增量索引 / 元件图标绘制 / 光路几何 /
-    追踪与求解 / 场景渲染 / 小地图 / HUD / 编辑操作 / 相机 / 事件分发 /
+    追踪与求解 / 场景渲染 / HUD / 编辑操作 / 相机 / 事件分发 /
     存档读档 / 撤销重做 / 主菜单 / 教程 / 设置页 / 主循环
 
 运行：script.py即可启动；打包见项目 README。
@@ -76,7 +78,7 @@ WORLD_WIDTH_PX, WORLD_HEIGHT_PX = WORLD_COLS * BASE_CELL_SIZE, WORLD_ROWS * BASE
 WORLD_MIN_PX = -WORLD_HALF_COLS * BASE_CELL_SIZE
 WORLD_MAX_PX = WORLD_HALF_COLS * BASE_CELL_SIZE
 WORLD_MIN_PY, WORLD_MAX_PY = WORLD_MIN_PX, WORLD_MAX_PX
-MIN_ZOOM, MAX_ZOOM, ZOOM_STEP = 0.4, 5.0, 0.1
+MIN_ZOOM, MAX_ZOOM, ZOOM_STEP = 0.2, 5.0, 0.1
 PAN_SPEED_PX = 500
 MAX_FRAME_DT_S = 0.05
 
@@ -104,11 +106,6 @@ ICON_BAR_GAP = int(ICON_SIZE * 0.22)
 ICON_RING_R, ICON_RING_W = int(ICON_SIZE * 0.4), int(ICON_SIZE * 0.12)
 ICON_LATCH_R, ICON_LATCH_CORE = int(ICON_SIZE * 0.4), int(ICON_SIZE * 0.25)
 
-MM_SIZE, MM_MARGIN = 180, 10
-MM_RELATIVE_SCALE = 0.05
-MM_SCAN_CELL_LIMIT = 40000
-MM_CROSS = 6
-_MM_DBLCLICK_MS = 300
 
 HOTBAR_CELL = 60
 HOTBAR_GAP = 6
@@ -134,7 +131,6 @@ KEY_TOOL_BASE = pygame.K_1
 KEY_ROTATE_ELEMENT = pygame.K_q
 KEY_CYCLE_PLACE_ROT = pygame.K_e
 KEY_TOGGLE_SWITCH = pygame.K_f
-KEY_TOGGLE_MINIMAP = pygame.K_m
 KEY_PASTE_SLOT = pygame.K_v
 KEY_UNDO = pygame.K_z
 KEY_REDO = pygame.K_x
@@ -165,7 +161,6 @@ _DEFAULT_KEYS = {
     'rotate': KEY_ROTATE_ELEMENT,
     'cycle_rot': KEY_CYCLE_PLACE_ROT,
     'toggle_switch': KEY_TOGGLE_SWITCH,
-    'minimap': KEY_TOGGLE_MINIMAP,
     'paste': KEY_PASTE_SLOT,
     'pause': KEY_TOGGLE_PAUSE,
     'perf': KEY_TOGGLE_PERF,
@@ -221,7 +216,6 @@ def apply_keymap() -> None:
     g['KEY_ROTATE_ELEMENT'] = KEYMAP['rotate']
     g['KEY_CYCLE_PLACE_ROT'] = KEYMAP['cycle_rot']
     g['KEY_TOGGLE_SWITCH'] = KEYMAP['toggle_switch']
-    g['KEY_TOGGLE_MINIMAP'] = KEYMAP['minimap']
     g['KEY_PASTE_SLOT'] = KEYMAP['paste']
     g['KEY_TOGGLE_PAUSE'] = KEYMAP['pause']
     g['KEY_TOGGLE_PERF'] = KEYMAP['perf']
@@ -428,7 +422,7 @@ TEXTS = {
         'key.select_tool': 'Select tool   {name}',
         'key.undo': 'Undo', 'key.redo': 'Redo',
         'key.rotate': 'Rotate element', 'key.cycle_rot': 'Cycle place rotation',
-        'key.toggle_switch': 'Toggle switch / power', 'key.minimap': 'Toggle minimap',
+        'key.toggle_switch': 'Toggle switch / power',
         'key.paste': 'Stamp-paste slot', 'key.pause': 'Pause / resume',
         'key.perf': 'Toggle perf panel', 'key.save_1': 'Save', 'key.load': 'Load',
         'key.pan_up': 'Pan up', 'key.pan_down': 'Pan down',
@@ -449,7 +443,7 @@ TEXTS = {
         'tut.play.move': '{pan} move   {alt} alt move   MMB drag',
         'tut.play.undo': '{undo} undo  {redo} redo   {del_} erase',
         'tut.play.save': '{save} save   {load} load   {paste} stamp-paste',
-        'tut.play.misc': '{minimap} toggle minimap   {pause} pause/resume',
+        'tut.play.misc': '{pause} pause/resume',
         'tut.play.esc': 'ESC x2 returns to menu   ESC quit from menu',
         'tut.play.solver': 'solver recomputes only on change',
         'tut.play.perf': '{perf} perf panel: FPS / solve ms / cells / undo depth',
@@ -459,7 +453,7 @@ TEXTS = {
         'tut.el.mirror': 'Mirror: reflects 45 degrees, bends the beam by 90 degrees',
         'tut.el.splitter': 'Splitter: splits one beam into pass-through + reflected',
         'tut.el.coupler': 'Coupler: merges several beams toward one output',
-        'tut.el.and_gate': 'AND gate: lights output only when inputs are present',
+        'tut.el.and_gate': 'AND gate: lights output only when two adjacent inputs are present',
         'tut.el.latch': 'Latch: self-holds on/off, one bit of memory',
         'tut.el.delay_line': 'Delay line: the only time element, stores N ticks then emits',
         'tut.tip.solver': 'Light is solved within one tick; only delay line carries state',
@@ -499,7 +493,6 @@ TEXTS = {
         'key.undo': '撤销', 'key.redo': '重做',
         'key.rotate': '旋转元件', 'key.cycle_rot': '切换放置朝向',
         'key.toggle_switch': '切换开关 / 电源',
-        'key.minimap': '显示或隐藏小地图',
         'key.paste': '图章粘贴存档',
         'key.pause': '暂停或继续',
         'key.perf': '显示或隐藏性能面板',
@@ -522,7 +515,7 @@ TEXTS = {
         'tut.play.move': '{pan} 平移   {alt} 备用平移   中键拖拽',
         'tut.play.undo': '{undo} 撤销  {redo} 重做   {del_} 擦除',
         'tut.play.save': '{save} 保存   {load} 读取   {paste} 图章粘贴',
-        'tut.play.misc': '{minimap} 小地图   {pause} 暂停/继续',
+        'tut.play.misc': '{pause} 暂停/继续',
         'tut.play.esc': '连按两次 ESC 返回主菜单   主菜单按 ESC 退出程序',
         'tut.play.solver': '求解器仅在场景改动时重新计算',
         'tut.play.perf': '{perf} 性能面板：帧率 / 求解毫秒 / 元件数 / 撤销深度',
@@ -532,7 +525,7 @@ TEXTS = {
         'tut.el.mirror': '反射镜：以 45 度反射，使光束偏转 90 度',
         'tut.el.splitter': '分束器：把一束光分为透射与反射两路',
         'tut.el.coupler': '耦合器：把多束光汇聚到一个输出',
-        'tut.el.and_gate': '光与门：仅当两路输入都有光时才点亮输出',
+        'tut.el.and_gate': '光与门：仅当相邻两方向输入时才输出',
         'tut.el.latch': '光锁存器：自保持开或关，存储 1 个比特',
         'tut.el.delay_line': '延迟线：唯一的时序元件，存储 N 刻后再发出',
         'tut.tip.solver': '光路在一个刻内求解完毕；只有延迟线携带状态',
@@ -606,7 +599,7 @@ def build_key_action_labels():
          for i in range(len(TOOL_TYPES))]
         + [('undo', trans('key.undo')), ('redo', trans('key.redo')),
            ('rotate', trans('key.rotate')), ('cycle_rot', trans('key.cycle_rot')),
-           ('toggle_switch', trans('key.toggle_switch')), ('minimap', trans('key.minimap')),
+           ('toggle_switch', trans('key.toggle_switch')),
            ('paste', trans('key.paste')), ('pause', trans('key.pause')),
            ('perf', trans('key.perf'))]
         + [('save_1', trans('key.save_1'))]
@@ -630,8 +623,6 @@ def set_lang(lang):
         return
     _LANG = lang
     KEY_ACTION_LABELS = build_key_action_labels()
-    _MM_INFO_CACHE.clear()
-    _MM_LABEL_CACHE.clear()
 
 trace_note = 'ok'
 
@@ -835,7 +826,7 @@ def _view_range():
     return r0, c0, r1, c1
 
 def _cells_in_range(r0, r1, c0, c1, scan_by_bounds: bool) -> Iterator:
-    """遍历给定格范围内的元件：范围比元件表小就逐格查表，否则遍历元件表筛范围——两头都不空转。视口绘制与小地图共用。"""
+    """遍历给定格范围内的元件：范围比元件表小就逐格查表，否则遍历元件表筛范围——两头都不空转。供视口绘制使用。"""
     if scan_by_bounds:
         for row in range(r0, r1):
             for col in range(c0, c1):
@@ -846,6 +837,31 @@ def _cells_in_range(r0, r1, c0, c1, scan_by_bounds: bool) -> Iterator:
         for (row, col), data in grid_data.items():
             if r0 <= row < r1 and c0 <= col < c1:
                 yield row, col, data
+
+def _cells_in_view(r0, r1, c0, c1) -> Iterator:
+    """视口元件遍历（移动 / 缩放每帧调用）。
+    用已有的行有序索引 _idx_row_cols 把代价压到 O(min(行跨度, 元件数) + 命中元件数)：
+    - 行跨度 <= 有元件的行数：逐行取有序列列表，bisect 切出落在 [c0, c1) 的列，只贴视野内元件；
+    - 行跨度爆炸（缩到极小，视野覆盖上千上万行）：直接遍历元件表按范围筛，避免空扫上十万行。
+    两条路径都不再对整张 grid_data 全表遍历，也不再对视野逐格空查——这正是移动视角时
+    draw_scene 每帧的 O(N) 热点之一。
+    """
+    if (r1 - r0) <= len(_idx_row_cols):
+        for row in range(r0, r1):
+            cols = _idx_row_cols.get(row)
+            if not cols:
+                continue
+            lo = bisect.bisect_left(cols, c0)
+            hi = bisect.bisect_left(cols, c1, lo)
+            for col in cols[lo:hi]:
+                data = grid_data.get((row, col))
+                if data is not None:
+                    yield row, col, data
+    else:
+        for (row, col), data in grid_data.items():
+            if r0 <= row < r1 and c0 <= col < c1:
+                yield row, col, data
+
 
 def screen_to_grid(mouse_x, mouse_y):
     """屏幕像素 -> 世界格坐标 (row, col)。"""
@@ -1482,8 +1498,7 @@ def _draw_cells_in_view(hover_row, hover_col) -> None:
                     (int(round((hover_col * BASE_CELL_SIZE - camera_x) * zoom)),
                      int(round((hover_row * BASE_CELL_SIZE - camera_y) * zoom))))
 
-    scan = len(grid_data) > (end_row - start_row) * (end_col - start_col)
-    for row, col, data in _cells_in_range(start_row, end_row, start_col, end_col, scan):
+    for row, col, data in _cells_in_view(start_row, end_row, start_col, end_col):
         _draw_element(data, int(round((col * BASE_CELL_SIZE - camera_x) * zoom)),
                       int(round((row * BASE_CELL_SIZE - camera_y) * zoom)), cell_size)
 
@@ -1496,11 +1511,25 @@ def _draw_rays(ray_segments: List[Segment]) -> None:
     if not ray_segments:
         return
     line_width = max(2, int(BASE_CELL_SIZE * 0.1 * zoom))
+    view_w, view_h = screen.get_size()
+    inv = 1.0 / zoom
+    # 视口对应的世界包围盒（含线宽与端点余量）。两端点同侧落在盒外的光段整条跳过：
+    # 大规模场景里上万条全局光路绝大多数在屏幕之外，每帧逐条 draw.line 是移动视角卡顿
+    # 的另一主因，这一步把它们从"逐条仿射+draw"降到"几次浮点比较"。
+    margin = line_width * inv + BASE_CELL_SIZE
+    vx0 = camera_x - margin
+    vx1 = camera_x + view_w * inv + margin
+    vy0 = camera_y - margin
+    vy1 = camera_y + view_h * inv + margin
+    draw_line = pygame.draw.line
     for (x1, y1), (x2, y2) in ray_segments:
-        pygame.draw.line(screen, COLOR_ON,
-                         (int(round((x1 - camera_x) * zoom)), int(round((y1 - camera_y) * zoom))),
-                         (int(round((x2 - camera_x) * zoom)), int(round((y2 - camera_y) * zoom))),
-                         line_width)
+        if (x1 < vx0 and x2 < vx0) or (x1 > vx1 and x2 > vx1) or \
+           (y1 < vy0 and y2 < vy0) or (y1 > vy1 and y2 > vy1):
+            continue
+        draw_line(screen, COLOR_ON,
+                  (int(round((x1 - camera_x) * zoom)), int(round((y1 - camera_y) * zoom))),
+                  (int(round((x2 - camera_x) * zoom)), int(round((y2 - camera_y) * zoom))),
+                  line_width)
 
 _game_glow_cache: dict = {}
 
@@ -1524,14 +1553,13 @@ def _draw_game_glow() -> None:
 
 
 def draw_scene(ray_segments: List[Segment]) -> None:
-    """渲染一帧：光晕底（最底层，照搬主界面竖向渐变）-> 网格与元件 -> 光路 -> HUD -> 缩略图。"""
+    """渲染一帧：光晕底（最底层，照搬主界面竖向渐变）-> 网格与元件 -> 光路 -> HUD。"""
     _draw_game_glow()
     mouse_pos = pygame.mouse.get_pos()
-    _ui_hover = minimap_hit(mouse_pos) or hotbar_index_at(mouse_pos) is not None
+    _ui_hover = hotbar_index_at(mouse_pos) is not None
     hover_row, hover_col = (None, None) if _ui_hover else screen_to_grid(*mouse_pos)
     _draw_cells_in_view(hover_row, hover_col)
     _draw_rays(ray_segments)
-    draw_minimap(ray_segments)
     draw_hotbar()
 
 # 字体加载：优先使用内置思源黑体 SourceHanSansSC.otf（可正常渲染中文），
@@ -1568,125 +1596,12 @@ def _load_font(size, bold=False):
     _font_cache[key] = font
     return font
 
-MM_FONT = _load_font(12)
 
-minimap_visible = True
-minimap_dirty = True
-_minimap_surface: Optional[pygame.Surface] = None
-_minimap_key: Optional[Tuple[int, int, int]] = None
-_minimap_dragging = False
-#======================================================================
-#  小地图 Minimap：缩略渲染、命中与相机跳转
-#======================================================================
-_mm_last_click_ms = 0
-
-def _mm_scale() -> float:
-    """世界像素 -> 缩略图像素：主画面 1 倍，缩略图恒取其 0.05 倍。"""
-    return MM_RELATIVE_SCALE * zoom
-
-def _mm_rect():
-    """缩略图屏幕矩形，贴窗口右上角并跟随窗口尺寸。"""
-    width, height = screen.get_size()
-    return pygame.Rect(width - MM_SIZE - MM_MARGIN, MM_MARGIN, MM_SIZE, MM_SIZE)
-
-def _mm_center():
-    """当前视口中心的世界坐标，同时也是图幅正中心。"""
-    return camera_x + (WINDOW_WIDTH / zoom) / 2.0, camera_y + (WINDOW_HEIGHT / zoom) / 2.0
-
-def _mm_key():
-    """缓存键：视口中心（取整）与倍率，任一变化说明局部内容已经换了一批。"""
-    center_x, center_y = _mm_center()
-    return int(center_x), int(center_y), round(zoom, 3)
-
-def _mm_to_map(world_x, world_y):
-    """世界坐标 -> 图幅坐标（浮点，以图幅中心为锚点），不做裁剪。"""
-    scale, (center_x, center_y) = _mm_scale(), _mm_center()
-    return (MM_SIZE / 2.0 + (world_x - center_x) * scale,
-            MM_SIZE / 2.0 + (world_y - center_y) * scale)
-
-def _mm_point(world_x, world_y):
-    """世界坐标 -> 图幅坐标（整数并夹进图幅内），用于画不需要精确端点的点状物。"""
-    map_x, map_y = _mm_to_map(world_x, world_y)
-    return min(MM_SIZE - 1, max(0, int(map_x))), min(MM_SIZE - 1, max(0, int(map_y)))
-
-def _mm_clip_segment(p1, p2):
-    """用 Liang-Barsky 把一段光路裁到图幅 [0, MM_SIZE] 内，完全在图外返回 None。
-
-    为什么不能只把两端点各自夹进图幅：一条斜穿图幅的光段会被拉成贴着边框的折线，
-    在框上画出根本不存在的"假光路"。参数化求交后只画真正落在图幅内的那一截，
-    小地图上的光路才与主画面严格一致。
-    """
-    x1, y1 = _mm_to_map(*p1)
-    x2, y2 = _mm_to_map(*p2)
-    dx, dy = x2 - x1, y2 - y1
-    t0, t1 = 0.0, 1.0
-    for p, q in ((-dx, x1), (dx, MM_SIZE - x1), (-dy, y1), (dy, MM_SIZE - y1)):
-        if p == 0:
-            if q < 0:
-                return None
-        else:
-            t = q / p
-            if p < 0:
-                if t > t1:
-                    return None
-                t0 = max(t0, t)
-            else:
-                if t < t0:
-                    return None
-                t1 = min(t1, t)
-    return (x1 + dx * t0, y1 + dy * t0), (x1 + dx * t1, y1 + dy * t1)
-
-def build_minimap(ray_segments) -> None:
-    """重画缩略图并写进缓存：底色 -> 世界边界 -> 光路 -> 元件点 -> 边框。
-
-    这是一张"视口局部图"而不是全图缩略图：图幅中心恒等于视口中心，倍率恒为主画面的
-    0.05 倍。好处是元件能按所在格在图上的真实相对大小画成小方块（哪怕世界有 15 万元件，
-    也不会糊成一片噪点），代价是看不出全貌，所以靠近世界尽头时会把边界线画出来当方位感。
-    光路先裁进图幅再画；元件点的取源同样按"范围格数 vs 元件数"双向择优。
-    """
-    global _minimap_surface, minimap_dirty, _minimap_key
-    scale = _mm_scale()
-    center_x, center_y = _mm_center()
-    half = (MM_SIZE / 2.0) / scale
-    surf = pygame.Surface((MM_SIZE, MM_SIZE), pygame.SRCALPHA)
-    surf.fill(_tint(COLOR_BG, 140))
-    for world_x in (WORLD_MIN_PX, WORLD_MAX_PX):
-        map_x, _ = _mm_to_map(world_x, center_y)
-        if -1 <= map_x <= MM_SIZE:
-            pygame.draw.line(surf, COLOR_GRID, (int(map_x), 0), (int(map_x), MM_SIZE - 1), 1)
-    for world_y in (WORLD_MIN_PY, WORLD_MAX_PY):
-        _, map_y = _mm_to_map(center_x, world_y)
-        if -1 <= map_y <= MM_SIZE:
-            pygame.draw.line(surf, COLOR_GRID, (0, int(map_y)), (MM_SIZE - 1, int(map_y)), 1)
-    ray_width = max(1, int(round(BASE_CELL_SIZE * 0.1 * zoom * MM_RELATIVE_SCALE)))
-    for (x1, y1), (x2, y2) in ray_segments:
-        clipped = _mm_clip_segment((x1, y1), (x2, y2))
-        if clipped:
-            (mx1, my1), (mx2, my2) = clipped
-            pygame.draw.line(surf, COLOR_ON, (int(mx1), int(my1)), (int(mx2), int(my2)),
-                             ray_width)
-    dot = max(2, int(round(BASE_CELL_SIZE * scale)))
-    lo_row = max(-WORLD_HALF_ROWS, int((center_y - half) // BASE_CELL_SIZE) - 1)
-    hi_row = min(WORLD_HALF_ROWS, int((center_y + half) // BASE_CELL_SIZE) + 2)
-    lo_col = max(-WORLD_HALF_COLS, int((center_x - half) // BASE_CELL_SIZE) - 1)
-    hi_col = min(WORLD_HALF_COLS, int((center_x + half) // BASE_CELL_SIZE) + 2)
-    span = (hi_row - lo_row) * (hi_col - lo_col)
-    scan = len(grid_data) > span and span <= MM_SCAN_CELL_LIMIT
-    for row, col, data in _cells_in_range(lo_row, hi_row, lo_col, hi_col, scan):
-        cell_x, cell_y = _cell_center(col, row)
-        map_x, map_y = _mm_point(cell_x, cell_y)
-        working = data.get('is_lit', False) or data.get('is_on', False)
-        pygame.draw.rect(surf, COLOR_ON if working else COLOR_OFF,
-                         (map_x - dot // 2, map_y - dot // 2, dot, dot))
-    pygame.draw.rect(surf, COLOR_GRID, surf.get_rect(), 1)
-    _minimap_surface = surf
-    minimap_dirty = False
-    _minimap_key = _mm_key()
 
 def _text(font, text, cache, limit, bg_pad=None):
     """按文本缓存 render 结果（可选配一张半透明底）。
 
-    HUD 与小地图读数绝大多数帧一字不变，60 FPS 下每帧重建 Surface 纯属白烧；
+    HUD 读数绝大多数帧一字不变，60 FPS 下每帧重建 Surface 纯属白烧；
     文案总共固定十几条，超上限整表重来也不会有可感知的抖动。
     需要半透明底时交回 (文字, 底) 一对，尺寸必须用调用方那把字体量——
     借另一号字的缓存会算错底框大小，在文字边上压出黑斑。
@@ -1707,68 +1622,6 @@ def _text(font, text, cache, limit, bg_pad=None):
         return value
     return pair
 
-_MM_LABEL_CACHE: Dict[str, pygame.Surface] = {}
-_MM_INFO_CACHE: Dict[str, Tuple[pygame.Surface, pygame.Surface]] = {}
-
-def draw_minimap(ray_segments) -> None:
-    """渲染缩略图：需要时先重建缓存 -> blit 到右上角 -> 叠视口框、中心十字与读数。"""
-    if not minimap_visible:
-        return
-    surf = _minimap_surface
-    if minimap_dirty or surf is None or _minimap_key != _mm_key():
-        build_minimap(ray_segments)
-        surf = _minimap_surface
-    if surf is None:
-        return
-    rect = _mm_rect()
-    screen.blit(surf, rect.topleft)
-    scale = _mm_scale()
-    view_w = max(2, min(MM_SIZE - 2, int((WINDOW_WIDTH / zoom) * scale)))
-    view_h = max(2, min(MM_SIZE - 2, int((WINDOW_HEIGHT / zoom) * scale)))
-    center_x, center_y = rect.center
-    pygame.draw.rect(screen, COLOR_ON,
-                     pygame.Rect(center_x - view_w // 2, center_y - view_h // 2, view_w, view_h), 1)
-    pygame.draw.line(screen, COLOR_ON, (center_x - MM_CROSS, center_y),
-                     (center_x + MM_CROSS, center_y), 1)
-    pygame.draw.line(screen, COLOR_ON, (center_x, center_y - MM_CROSS),
-                     (center_x, center_y + MM_CROSS), 1)
-    view_row, view_col = screen_to_grid(WINDOW_WIDTH / 2.0, WINDOW_HEIGHT / 2.0)
-    info, info_bg = _text(MM_FONT, trans('ui.view_info', r=view_row, c=view_col,
-                                         z='%.1f' % zoom),
-                          _MM_INFO_CACHE, 64, (8, 2))
-    screen.blit(info_bg, (rect.right - info.get_width() - 10, rect.bottom + 2))
-    screen.blit(info, (rect.right - info.get_width() - 6, rect.bottom + 3))
-
-def minimap_hit(mouse_pos) -> bool:
-    """鼠标是否落在缩略图内；落在图内的点击一律当导航，不再触发放置 / 擦除。"""
-    return minimap_visible and _mm_rect().collidepoint(mouse_pos)
-
-def focus_camera_on_map(mouse_x: float, mouse_y: float) -> None:
-    """缩略图导航：以图幅中心为锚点把点击处换算成新的视口中心，再反算相机左上角。"""
-    global camera_x, camera_y
-    rect = _mm_rect()
-    scale = _mm_scale()
-    center_x, center_y = _mm_center()
-    camera_x = center_x + (mouse_x - rect.centerx) / scale - (WINDOW_WIDTH / zoom) / 2.0
-    camera_y = center_y + (mouse_y - rect.centery) / scale - (WINDOW_HEIGHT / zoom) / 2.0
-    clamp_camera()
-
-def reset_view_to_origin() -> None:
-    """双击小地图：把视口中心拉回世界像素原点 (0,0)，再夹回世界边界。
-
-    视口中心的世界坐标 = camera + (窗口尺寸 / zoom) / 2；要让它等于 0，
-    只需把相机左上角设为该半视口尺寸的反面，口径与 _mm_center 完全一致。
-    """
-    global camera_x, camera_y
-    camera_x = -(WINDOW_WIDTH / zoom) / 2.0
-    camera_y = -(WINDOW_HEIGHT / zoom) / 2.0
-    clamp_camera()
-
-def toggle_minimap() -> None:
-    """M 键：切换显隐；重新显示时置脏，保证画面上是最新的光路。"""
-    global minimap_visible, minimap_dirty
-    minimap_visible = not minimap_visible
-    minimap_dirty = True
 
 HOTBAR_FONT = _load_font(11)
 HOTBAR_NAME_FONT = _load_font(24)
@@ -1804,9 +1657,7 @@ def _rotate_btn_rect() -> pygame.Rect:
     return pygame.Rect(max(4, first.x - HOTBAR_GAP - HOTBAR_CELL), first.y, HOTBAR_CELL, HOTBAR_CELL)
 
 def _is_ui_pos(pos) -> bool:
-    """光标是否压在任一 UI 上（小地图 / 快捷栏 / 左右侧键）——放置与擦除据此防穿透。"""
-    if minimap_hit(pos):
-        return True
+    """光标是否压在任一 UI 上（快捷栏 / 左右侧键）——放置与擦除据此防穿透。"""
     if hotbar_index_at(pos) is not None:
         return True
     return _rotate_btn_rect().collidepoint(pos)
@@ -1959,14 +1810,14 @@ def erase_element() -> None:
     grid_changed = world_dirty = True
 
 def delete_erase_at_cursor() -> None:
-    """Delete 擦除入口：光标压在底部快捷栏或小地图上时不穿透误删。"""
+    """Delete 擦除入口：光标压在底部快捷栏上时不穿透误删。"""
     _mp = pygame.mouse.get_pos()
     if _is_ui_pos(_mp):
         return
     erase_element()
 
 def place_at_cursor() -> None:
-    """放置入口（右键 / Enter 长按）：光标压在快捷栏 / 左右侧键 / 小地图上时不穿透误放；
+    """放置入口（右键 / Enter 长按）：光标压在快捷栏 / 左右侧键上不穿透误放；
     长按时每格只放一次——停在同一格下一帧跳过，避免每帧重复压撤销栈。"""
     global _place_last_coord
     _mp = pygame.mouse.get_pos()
@@ -2096,7 +1947,7 @@ def pan_camera(dt: float) -> None:
 
 def handle_event(event):
     """处理一个事件并派发到对应动作；返回 False 表示要退出主循环。"""
-    global current_tool, WINDOW_WIDTH, WINDOW_HEIGHT, _minimap_dragging, is_dragging, delete_held, _mm_last_click_ms
+    global current_tool, WINDOW_WIDTH, WINDOW_HEIGHT, is_dragging, delete_held
     global place_held, _place_last_coord, place_rot
     global last_mouse_pos, screen_state, _game_esc_time, perf_visible, paused
     if event.type == pygame.QUIT:
@@ -2105,18 +1956,6 @@ def handle_event(event):
         WINDOW_WIDTH, WINDOW_HEIGHT = event.w, event.h
         clamp_camera()
     elif event.type == pygame.MOUSEBUTTONDOWN:
-        if minimap_hit(event.pos):
-            if event.button == 1:
-                now_ms = pygame.time.get_ticks()
-                if now_ms - _mm_last_click_ms <= _MM_DBLCLICK_MS:
-                    _mm_last_click_ms = 0
-                    _minimap_dragging = False
-                    reset_view_to_origin()
-                else:
-                    _mm_last_click_ms = now_ms
-                    _minimap_dragging = True
-                    focus_camera_on_map(*event.pos)
-            return True
         hb_idx = hotbar_index_at(event.pos)
         if hb_idx is not None:
             if event.button == 1:
@@ -2149,15 +1988,9 @@ def handle_event(event):
         elif event.button == ERASE_BTN:
             delete_held = False
             _stroke_commit()
-        _minimap_dragging = False
     elif event.type == pygame.MOUSEMOTION:
         buttons = event.buttons
-        if _minimap_dragging:
-            if buttons[0]:
-                focus_camera_on_map(*event.pos)
-            else:
-                _minimap_dragging = False
-        elif is_dragging:
+        if is_dragging:
             if buttons[1]:
                 drag_camera()
             else:
@@ -2173,8 +2006,6 @@ def handle_event(event):
             zoom_camera(-1)
         elif event.key == KEY_TOGGLE_SWITCH:
             toggle_switch()
-        elif event.key == KEY_TOGGLE_MINIMAP:
-            toggle_minimap()
         elif event.key == KEY_ROTATE_ELEMENT:
             rotate_element(1)
         elif event.key == KEY_CYCLE_PLACE_ROT:
@@ -2274,7 +2105,7 @@ def serialize_world(with_camera: bool = True) -> dict:
     out = {'version': SAVE_VERSION, 'cells': cells}
     if with_camera:
         out['camera'] = {'camera_x': camera_x, 'camera_y': camera_y, 'zoom': zoom,
-                         'current_tool': current_tool, 'minimap_visible': minimap_visible}
+                         'current_tool': current_tool}
     return out
 
 def _normalize_cell(key, item):
@@ -2401,8 +2232,8 @@ def _f4_target_slot() -> int:
 
 def load_slot(slot: int) -> bool:
     """读档：消毒 -> 整盘替换 grid_data -> 还原相机与工具 -> 置脏重算光路。"""
-    global grid_data, camera_x, camera_y, zoom, current_tool, minimap_visible
-    global world_dirty, last_slot, grid_changed, minimap_dirty, timeline_present
+    global grid_data, camera_x, camera_y, zoom, current_tool
+    global world_dirty, last_slot, grid_changed, timeline_present
     if slot not in SAVE_SLOTS:
         return False
     try:
@@ -2421,7 +2252,6 @@ def load_slot(slot: int) -> bool:
         tool = cam.get('current_tool')
         if isinstance(tool, int) and tool in range(len(TOOL_TYPES)):
             current_tool = tool
-        minimap_visible = bool(cam.get('minimap_visible', minimap_visible))
         clamp_camera()
     world_dirty = False
     last_slot = slot
@@ -2429,7 +2259,7 @@ def load_slot(slot: int) -> bool:
     reset_timeline('load slot %d' % slot)
     _note(trans('note.loaded', slot=slot, cells=len(grid_data)))
     _refresh_slot_status()
-    grid_changed = minimap_dirty = True
+    grid_changed = True
     return True
 
 
@@ -2447,11 +2277,11 @@ def paste_slot_at_cursor(slot: int = 0) -> bool:
 
     对齐口径：取存档里 row 与 col 的最小值当作这块内容的左上角，平移量 = 光标格 - 这个角，
     于是存档的左上角正好落在光标格上，其余元件按同一个偏移量跟着平移。
-    只搬元件：存档里的相机 / 工具 / 小地图显隐一概不动，那是那份存档自己的视角。
+    只搬元件：存档里的相机 / 工具显隐一概不动，那是那份存档自己的视角。
     越界格剔除；与已有元件同格时覆盖，和右键放置的口径一致。
     整次粘贴只压一步快照，一次 Z 就能把这一整块撤掉。
     """
-    global grid_changed, minimap_dirty, world_dirty, last_slot
+    global grid_changed, world_dirty, last_slot
     target = slot if slot in SAVE_SLOTS else _f4_target_slot()
     if not target:
         _note(trans('note.paste_none'))
@@ -2491,7 +2321,7 @@ def paste_slot_at_cursor(slot: int = 0) -> bool:
     _note(trans('note.pasted', slot=target, r=anchor_row, c=anchor_col,
                 cells=pasted, over=covered, out=dropped))
     _refresh_slot_status()
-    grid_changed = minimap_dirty = True
+    grid_changed = True
     return True
 #======================================================================
 #  撤销 / 重做 Undo-Redo：基于格子增量的快照栈
@@ -2541,7 +2371,7 @@ def _restore(stack: List[List[Tuple[Coord, Optional[dict]]]],
              label_key: str) -> bool:
     """撤销 / 重做的公共部分：按格回滚、时序归零、把反向 delta 塞进对面那口栈（相机不动，免得视角乱跳）。
     label 为内部 id（供 reset_timeline 用），label_key 为对应词条 key（供界面提示用）。"""
-    global grid_data, world_dirty, grid_changed, minimap_dirty
+    global grid_data, world_dirty, grid_changed
     if not stack:
         _note(trans('note.undo_nothing', label=trans(label_key)))
         return False
@@ -2552,7 +2382,7 @@ def _restore(stack: List[List[Tuple[Coord, Optional[dict]]]],
     reset_timeline(label)
     world_dirty = True
     _note(trans('note.undo_done', label=trans(label_key), cells=len(entries), now=len(grid_data)))
-    grid_changed = minimap_dirty = True
+    grid_changed = True
     return True
 
 def undo() -> bool:
@@ -2787,8 +2617,7 @@ def build_tutorial_sections():
                        redo=_key_label(KEYMAP['redo']), del_=_key_label(pygame.K_DELETE))),
             ('', trans('tut.play.save', save=save_rng, load=_key_label(KEYMAP['load']),
                        paste=_key_label(KEYMAP['paste']))),
-            ('', trans('tut.play.misc', minimap=_key_label(KEYMAP['minimap']),
-                       pause=_key_label(KEYMAP['pause']))),
+            ('', trans('tut.play.misc', pause=_key_label(KEYMAP['pause']))),
             ('', trans('tut.play.esc')),
             ('', trans('tut.play.solver')),
             ('', trans('tut.play.perf', perf=_key_label(KEYMAP['perf']))),
@@ -2949,9 +2778,8 @@ def _rebuild_icons() -> None:
 
 
 def _apply_theme(name: str) -> None:
-    """切换到指定主题：重着色四色全局 -> 重烘图标 -> 清空背景/光晕缓存 -> 令缩略图失效。"""
+    """切换到指定主题：重着色四色全局 -> 重烘图标 -> 清空背景/光晕缓存。"""
     global COLOR_ON, COLOR_OFF, COLOR_BG, COLOR_GRID, current_theme
-    global minimap_dirty, _minimap_surface
     theme = THEMES.get(name)
     if theme is None:
         return
@@ -2963,8 +2791,6 @@ def _apply_theme(name: str) -> None:
     _rebuild_icons()
     _menu_bg_cache.clear()
     _game_glow_cache.clear()
-    _minimap_surface = None
-    minimap_dirty = True
 
 
 def _save_settings() -> None:
@@ -3300,21 +3126,42 @@ perf_visible = False
 PERF_FONT = _load_font(14)
 
 def _draw_perf_panel() -> None:
-    """左上角半透明读数框：FPS、每刻求解耗时(ms)、当前元件数、撤销栈深/上限。"""
-    lines = (
+    """左上角半透明读数框，两列布局。
+    左列：FPS、每刻求解耗时(ms)、撤销栈深/上限。
+    右列：当前方块(元件)个数、鼠标所对方块坐标、放大倍数。"""
+    mouse_pos = pygame.mouse.get_pos()
+    if _is_ui_pos(mouse_pos):
+        hover_txt = ' -- , -- '
+    else:
+        hr, hc = screen_to_grid(*mouse_pos)
+        hover_txt = 'r%-4d c%-4d' % (hr, hc)
+    col1 = (
         'FPS   %5.1f' % clock.get_fps(),
         'solve %6.2f ms' % _PERF['solve_ms'],
-        'cells %d' % len(grid_data),
         'undo  %d / %d' % (len(undo_stack), UNDO_LIMIT),
     )
-    pad, line_h, box_w = 6, 18, 168
-    box_h = pad * 2 + line_h * len(lines)
+    col2 = (
+        'cells %d' % len(grid_data),
+        'mouse %s' % hover_txt,
+        'zoom  %.2fx' % zoom,
+    )
+    pad, line_h, col_gap = 6, 18, 16
+    col1_w = max(PERF_FONT.size(s)[0] for s in col1)
+    col2_w = max(PERF_FONT.size(s)[0] for s in col2)
+    box_w = pad * 2 + col1_w + col_gap + col2_w
+    box_h = pad * 2 + line_h * max(len(col1), len(col2))
     box = pygame.Surface((box_w, box_h), pygame.SRCALPHA)
     box.fill(_tint(COLOR_BG, 190))
     screen.blit(box, (10, 10))
     pygame.draw.rect(screen, COLOR_ON, (10, 10, box_w, box_h), 1)
-    for i, line in enumerate(lines):
-        screen.blit(PERF_FONT.render(line, True, COLOR_ON), (10 + pad, 10 + pad + i * line_h))
+    for i, line in enumerate(col1):
+        screen.blit(PERF_FONT.render(line, True, COLOR_ON),
+                    (10 + pad, 10 + pad + i * line_h))
+    col2_x = 10 + pad + col1_w + col_gap
+    for i, line in enumerate(col2):
+        screen.blit(PERF_FONT.render(line, True, COLOR_ON),
+                    (col2_x, 10 + pad + i * line_h))
+
 #======================================================================
 #  主循环 main：固定 60 FPS 的 事件 -> 推进 -> 渲染
 #======================================================================
@@ -3322,7 +3169,7 @@ def _draw_perf_panel() -> None:
 
 def main():
     """固定 60 FPS：收事件 -> 平移 -> 按需推进时序 -> 渲染并翻页。"""
-    global grid_changed, cached_ray_segments, minimap_dirty, _pending_solve
+    global grid_changed, cached_ray_segments, _pending_solve
     running = True
     last_tick_at = time.perf_counter()
     _prev_esc_active = False
@@ -3370,7 +3217,6 @@ def main():
             _solve_t0 = time.perf_counter()
             cached_ray_segments = step_tick(advance=not paused)
             _PERF['solve_ms'] = (time.perf_counter() - _solve_t0) * 1000.0
-            minimap_dirty = True
             solved_this_frame = True
         elif timeline_present and not paused:
             if _pending_solve is None and \
@@ -3383,7 +3229,6 @@ def main():
             _PERF['solve_ms'] = (time.perf_counter() - _solve_t0) * 1000.0
             if _seg is not None:
                 cached_ray_segments = _seg
-                minimap_dirty = True
                 solved_this_frame = True
         cam_moved = (camera_x, camera_y, zoom) != prev_cam
         esc_active = _game_esc_time > 0 and \
