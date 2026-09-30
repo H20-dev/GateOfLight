@@ -1,6 +1,3 @@
-
-
-
 """GateOfLight —— 光路逻辑沙盒 (Light-based Logic Sandbox)
 
 一个用 pygame 编写的单机沙盒游戏：在近乎无限的可缩放网格上摆放光学元件，让激光束
@@ -78,7 +75,7 @@ WORLD_WIDTH_PX, WORLD_HEIGHT_PX = WORLD_COLS * BASE_CELL_SIZE, WORLD_ROWS * BASE
 WORLD_MIN_PX = -WORLD_HALF_COLS * BASE_CELL_SIZE
 WORLD_MAX_PX = WORLD_HALF_COLS * BASE_CELL_SIZE
 WORLD_MIN_PY, WORLD_MAX_PY = WORLD_MIN_PX, WORLD_MAX_PX
-MIN_ZOOM, MAX_ZOOM, ZOOM_STEP = 0.2, 5.0, 0.1
+MIN_ZOOM, MAX_ZOOM, ZOOM_FACTOR = 0.15, 5.0, 0.8
 PAN_SPEED_PX = 500
 MAX_FRAME_DT_S = 0.05
 
@@ -307,8 +304,10 @@ def _tint(color, alpha):
 #======================================================================
 
 
-camera_x = -WINDOW_WIDTH / 2.0
-camera_y = -WINDOW_HEIGHT / 2.0
+# 相机初值吸附到 BASE_CELL_SIZE 网格相位：保证进入沙盘首帧的活动网格线
+# 与主界面烘焙网格(相位固定于原点)逐条对齐，切换无跳变。
+camera_x = -round(WINDOW_WIDTH / 2.0 / BASE_CELL_SIZE) * BASE_CELL_SIZE
+camera_y = -round(WINDOW_HEIGHT / 2.0 / BASE_CELL_SIZE) * BASE_CELL_SIZE
 zoom = 1.0
 
 Coord = Tuple[int, int]
@@ -329,6 +328,7 @@ _idx_latch: Set[Coord] = set()
 _idx_delay: Set[Coord] = set()
 _lit_relay: Set[Coord] = set()
 _touched_and: Set[Coord] = set()
+_lit_walls: Set[Coord] = set()
 _RELAY_TYPES = ('mirror', 'splitter', 'coupler')
 _idx_row_cols: Dict[int, list] = {}
 _idx_col_rows: Dict[int, list] = {}
@@ -381,7 +381,7 @@ def _rebuild_indices() -> None:
     """清空并从 grid_data 全量重建所有增量索引。"""
     _idx_laser.clear(); _idx_latch.clear(); _idx_delay.clear()
     _idx_row_cols.clear(); _idx_col_rows.clear()
-    _lit_relay.clear(); _touched_and.clear()
+    _lit_relay.clear(); _touched_and.clear(); _lit_walls.clear()
     for coord, data in grid_data.items():
         _index_track(coord, data)
     _lit_relay.update(c for c, d in grid_data.items()
@@ -399,7 +399,7 @@ TOOL_TYPES = ('wall', 'laser', 'mirror', 'splitter', 'coupler', 'and_gate', 'lat
              'delay_line')
 SWITCHABLE_TYPES = ('laser',)
 TOOL_SPECS = {
-    'wall': lambda: {'type': 'wall', 'dir': 0},
+    'wall': lambda: {'type': 'wall', 'dir': 0, 'is_lit': False},
     'laser': lambda: {'type': 'laser', 'dir': 0, 'is_on': True},
     'mirror': lambda: {'type': 'mirror', 'dir': 0, 'is_lit': False},
     'splitter': lambda: {'type': 'splitter', 'dir': 0, 'is_lit': False},
@@ -683,7 +683,7 @@ def _make_laser_icon(color):
     surf = _surf(); _rect(surf, color, ICON_MAIN); _protrude(surf, color); return surf
 
 def _make_wall_icon(color):
-    """墙：实心方块，无开关态，只注册一套色。"""
+    """墙：实心方块，有开/关两态——被光照到时走开态(蓝)，否则灰；仅换色不改变挡光。"""
     surf = _surf(); _rect(surf, color, ICON_WALL); return surf
 
 def _make_mirror_icon(color):
@@ -742,14 +742,14 @@ def _make_off_mark_icon(color):
 
 ICONS: Dict[str, Dict[int, pygame.Surface]] = {}
 
-for _name, _maker in (('laser', _make_laser_icon), ('mirror', _make_mirror_icon),
+for _name, _maker in (('wall', _make_wall_icon), ('laser', _make_laser_icon),
+                      ('mirror', _make_mirror_icon),
                       ('splitter', _make_splitter_icon), ('coupler', _make_coupler_icon),
                       ('and_gate', _make_and_gate_icon), ('latch', _make_latch_icon),
                       ('delay_line', _make_delay_line_icon)):
     for _suffix, _color in (('_on', COLOR_ON), ('_off', COLOR_OFF)):
         ICONS[_name + _suffix] = _icon_frames(_maker(_color))
 
-ICONS['wall'] = _icon_frames(_make_wall_icon(COLOR_OFF))
 ICONS['off_mark'] = _icon_frames(_make_off_mark_icon(COLOR_ON))
 
 _SCALED_CACHE: Dict[Tuple[str, int, int], pygame.Surface] = {}
@@ -894,6 +894,7 @@ class TraceCtx:
     seen: Set[RayState] = field(default_factory=set)
     lit_relay: Set[Coord] = field(default_factory=set)
     lit_focus: Set[Coord] = field(default_factory=set)
+    lit_walls: Set[Coord] = field(default_factory=set)
     touched_and_gates: Set[Coord] = field(default_factory=set)
     touched_latchs: Set[Coord] = field(default_factory=set)
     touched_delay_lines: Set[Coord] = field(default_factory=set)
@@ -921,6 +922,8 @@ def _reset_cell_dynamic(coord: Coord, data: dict, dark: Optional[Set[Coord]] = N
         data['is_lit'] = bool(data.get('state'))
         data['input_dirs'] = set()
     elif element_type in ('coupler', 'mirror', 'splitter'):
+        data['is_lit'] = False
+    elif element_type == 'wall':
         data['is_lit'] = False
     elif element_type == 'delay_line':
         data['is_lit'] = bool(data.get('out_ready'))
@@ -970,6 +973,10 @@ def _baseline_reset() -> Tuple[List[Coord], Set[Coord], List[Coord], List[Coord]
         data = grid_data.get(coord)
         if data is not None and data.get('type') in _RELAY_TYPES:
             data['is_lit'] = False
+    for coord in _lit_walls:
+        data = grid_data.get(coord)
+        if data is not None and data.get('type') == 'wall':
+            data['is_lit'] = False
     for coord in _touched_and:
         data = grid_data.get(coord)
         if data is not None and data.get('type') == 'and_gate':
@@ -990,6 +997,8 @@ def _incremental_reset(prev: TraceCtx, dark: Set[Coord], lit_and_gates: Set[Coor
     for coord in prev.touched_and_gates | lit_and_gates:
         _wipe(coord, dark, and_gate_lit=coord in lit_and_gates)
     for coord in prev.touched_latchs | prev.touched_delay_lines:
+        _wipe(coord, dark)
+    for coord in prev.lit_walls:
         _wipe(coord, dark)
 
 
@@ -1108,7 +1117,12 @@ def _handle_delay_line(ctx, coord, hit_data, direction):
 
 
 def _handle_wall(ctx, coord, hit_data, direction):
-    """墙：入射段登记完即止，既不透射也不派生新射线（兼作未登记类型的兜底）。"""
+    """墙：入射段登记完即止，既不透射也不派生新射线（兼作未登记类型的兜底）。
+
+    被光照到仅切换自身颜色（is_lit -> 蓝色开态），挡光功能不变——仍返回 None 吸收光线。"""
+    if hit_data.get('type') == 'wall':
+        hit_data['is_lit'] = True
+        ctx.lit_walls.add(coord)
 
 ELEMENT_HANDLERS: Dict[str, Callable[..., HandlerResult]] = {
     'wall': _handle_wall, 'laser': _handle_laser, 'mirror': _handle_mirror,
@@ -1298,6 +1312,8 @@ def _solve_tick_iter(delay_line_seeds: List[RaySeed],
     _lit_relay.update(ctx.lit_focus)
     _touched_and.clear()
     _touched_and.update(ctx.touched_and_gates)
+    _lit_walls.clear()
+    _lit_walls.update(ctx.lit_walls)
     return segments, delay_line_coords, ctx.aborted
 
 
@@ -1467,15 +1483,14 @@ def _hover_surface(cell_size: int) -> pygame.Surface:
     return surf
 
 def _draw_element(data: dict, screen_x: int, screen_y: int, cell_size: int) -> None:
-    """贴本体 icon（按 is_lit 取 on/off 套色，墙单态）；手动关着的激光器再叠斜十字标记。
+    """贴本体 icon（按 is_lit 取 on/off 套色，墙亦有开/关两态）；手动关着的激光器再叠斜十字标记。
 
     is_lit 已由 _baseline_reset / solve_tick 保证等于本刻真实生效态，所以这里不需要
     任何"被光打灭但 is_on 仍为真"的特判——渲染层替状态模型打补丁正是 #2 的成因。
     手动关（is_on=False）叠斜十字，被光打灭只变暗灰，两种"不亮"仍可区分。
     """
     element_type = _etype(data)
-    name = ('wall' if element_type == 'wall'
-            else '%s_%s' % (element_type, 'on' if data.get('is_lit', False) else 'off'))
+    name = '%s_%s' % (element_type, 'on' if data.get('is_lit', False) else 'off')
     blit_icon(name, data['dir'], screen_x, screen_y, cell_size)
     if element_type in SWITCHABLE_TYPES and not data.get('is_on', True):
         blit_icon('off_mark', 0, screen_x, screen_y, cell_size)
@@ -1662,9 +1677,9 @@ def _is_ui_pos(pos) -> bool:
         return True
     return _rotate_btn_rect().collidepoint(pos)
 
-def _hotbar_icon_name(tool_type: str) -> str:
-    """快捷栏图标取该元件的"亮态"贴图；墙无开态，直接取其单一贴图名。"""
-    return tool_type if tool_type == 'wall' else tool_type + '_on'
+def _hotbar_icon_name(tool_type: str, selected: bool) -> str:
+    """快捷栏图标：选中的元件显示开态(on)，未选中的显示关态(off)。"""
+    return tool_type + ('_on' if selected else '_off')
 
 def draw_hotbar() -> None:
     """画底部快捷栏：逐格 半透明底 + 图标 + 左上角序号；选中蓝粗框、未选灰细框。
@@ -1678,15 +1693,16 @@ def draw_hotbar() -> None:
         side = HOTBAR_CELL - 8
         sx = rect.x + (rect.w - side) // 2
         sy = rect.y + (rect.h - side) // 2
-        blit_icon(_hotbar_icon_name(TOOL_TYPES[i]), place_rot, sx, sy, side)
+        blit_icon(_hotbar_icon_name(TOOL_TYPES[i], selected), place_rot, sx, sy, side)
         pygame.draw.rect(screen, COLOR_ON if selected else COLOR_OFF,
                          rect, 3 if selected else 1)
         num_col = COLOR_ON if selected else COLOR_OFF
         key_str = _key_label(KEYMAP['tool_%d' % i])
         shadow = HOTBAR_NUM_FONT.render(key_str, True, (0, 0, 0))
         num = HOTBAR_NUM_FONT.render(key_str, True, num_col)
-        screen.blit(shadow, (rect.x + 4, rect.y + 3))
-        screen.blit(num,    (rect.x + 3, rect.y + 2))
+        # 键位角标整体上移 3px，更贴近格子左上角
+        screen.blit(shadow, (rect.x + 4, rect.y))
+        screen.blit(num,    (rect.x + 3, rect.y - 1))
     label = HOTBAR_NAME_FONT.render(tool_display(current_tool), True, COLOR_ON)
     rot_btn = _rotate_btn_rect()
     lx = (rot_btn.x + rects[-1].right) // 2 - label.get_width() // 2
@@ -1707,8 +1723,9 @@ def _draw_ui_button(rect, active, draw_icon, label) -> None:
     if label:
         shadow = HOTBAR_NUM_FONT.render(label, True, (0, 0, 0))
         txt = HOTBAR_NUM_FONT.render(label, True, col)
-        screen.blit(shadow, (rect.x + 4, rect.y + 3))
-        screen.blit(txt, (rect.x + 3, rect.y + 2))
+        # 与快捷栏同款：键位角标整体上移 3px
+        screen.blit(shadow, (rect.x + 4, rect.y))
+        screen.blit(txt, (rect.x + 3, rect.y - 1))
 
 def _draw_rotate_btn() -> None:
     """左侧旋转按钮：循环箭头图标；place_rot≠0 时高亮，提示放置朝向已预设旋转。
@@ -1745,6 +1762,7 @@ last_mouse_pos = (0, 0)
 delete_held = False
 place_held = False
 _place_last_coord = None
+_stroke_last_coord: Optional[Coord] = None
 
 _stroke_active = False
 #======================================================================
@@ -1754,8 +1772,9 @@ _stroke_capture: Dict[Coord, Optional[dict]] = {}
 
 def _stroke_begin() -> None:
     """长按开始：开启事务并清空本段捕获表。"""
-    global _stroke_active
+    global _stroke_active, _stroke_last_coord
     _stroke_active = True
+    _stroke_last_coord = None
     _stroke_capture.clear()
 
 def _stroke_capture_cell(coord: Coord) -> None:
@@ -1775,11 +1794,36 @@ def _stroke_commit() -> None:
         del redo_stack[:]
     _stroke_capture.clear()
 
-def place_element() -> None:
+def _bresenham_cells(r0: int, c0: int, r1: int, c1: int) -> List[Coord]:
+    """返回从格 (r0,c0) 到 (r1,c1) 直线上途经的所有格（含两端）。
+    拖拽描边时用它把上一操作格到本帧光标格之间的空格补齐，
+    避免鼠标一帧跨数格时中间格被漏放/漏擦（正是隔几格才操作一次的根因）。"""
+    cells: List[Coord] = []
+    dr, dc = abs(r1 - r0), abs(c1 - c0)
+    sr = 1 if r0 < r1 else -1
+    sc = 1 if c0 < c1 else -1
+    err = dr - dc
+    r, c = r0, c0
+    while True:
+        cells.append((r, c))
+        if r == r1 and c == c1:
+            break
+        e2 = 2 * err
+        if e2 > -dc:
+            err -= dc
+            r += sr
+        if e2 < dr:
+            err += dr
+            c += sc
+    return cells
+
+def place_element(coord: Optional[Coord] = None) -> None:
     """放置当前工具的元件（默认左键；INVERT_MOUSE=True 时为右键）。
-    长按连铺时把本格改前态并入当前事务（松手统一记一步撤销），单次点击仍即时压栈。"""
+    长按连铺时把本格改前态并入当前事务（松手统一记一步撤销），单次点击仍即时压栈。
+    coord 显式给定时按该格放置（拖拽 Bresenham 补格用），否则取光标格。"""
     global grid_changed, world_dirty
-    coord = _cursor_coord()
+    if coord is None:
+        coord = _cursor_coord()
     if not _in_world_bounds(*coord):
         return
     if _stroke_active:
@@ -1795,10 +1839,12 @@ def place_element() -> None:
     reset_timeline('place')
     grid_changed = world_dirty = True
 
-def erase_element() -> None:
-    """擦除光标格（默认右键；INVERT_MOUSE=True 时为左键）；空格不登记，长按连删并入当前事务。"""
+def erase_element(coord: Optional[Coord] = None) -> None:
+    """擦除光标格（默认右键；INVERT_MOUSE=True 时为左键）；空格不登记，长按连删并入当前事务。
+    coord 显式给定时按该格擦除（拖拽 Bresenham 补格用），否则取光标格。"""
     global grid_changed, world_dirty
-    coord = _cursor_coord()
+    if coord is None:
+        coord = _cursor_coord()
     if coord not in grid_data:
         return
     if _stroke_active:
@@ -1810,24 +1856,43 @@ def erase_element() -> None:
     grid_changed = world_dirty = True
 
 def delete_erase_at_cursor() -> None:
-    """Delete 擦除入口：光标压在底部快捷栏上时不穿透误删。"""
+    """Delete / 右键擦除入口：光标压在底部快捷栏上不穿透误删；
+    描边时把上一操作格到当前光标格之间被跨过的格逐一补擦，修复拖拽连删漏格。"""
+    global _stroke_last_coord
     _mp = pygame.mouse.get_pos()
     if _is_ui_pos(_mp):
+        _stroke_last_coord = None
         return
-    erase_element()
+    coord = _cursor_coord()
+    prev = _stroke_last_coord
+    if prev is not None:
+        for cell in _bresenham_cells(prev[0], prev[1], coord[0], coord[1]):
+            if cell != prev:
+                erase_element(cell)
+    else:
+        erase_element(coord)
+    _stroke_last_coord = coord
 
 def place_at_cursor() -> None:
-    """放置入口（右键 / Enter 长按）：光标压在快捷栏 / 左右侧键上不穿透误放；
-    长按时每格只放一次——停在同一格下一帧跳过，避免每帧重复压撤销栈。"""
-    global _place_last_coord
+    """放置入口（左键 / Enter 长按 / 拖拽连铺）：光标压在快捷栏 / 左右侧键上不穿透误放；
+    描边时把上一操作格到当前光标格之间被跨过的格逐一补放，修复鼠标拖太快一帧跨数格
+    导致中间格漏放（隔几格才放一个）；停在同一格下一帧跳过，不重复压撤销栈。"""
+    global _place_last_coord, _stroke_last_coord
     _mp = pygame.mouse.get_pos()
     if _is_ui_pos(_mp):
+        _stroke_last_coord = None
         return
     coord = _cursor_coord()
     if coord == _place_last_coord:
         return
-    place_element()
-    _place_last_coord = coord
+    prev = _stroke_last_coord
+    if prev is not None:
+        for cell in _bresenham_cells(prev[0], prev[1], coord[0], coord[1]):
+            if cell != prev:
+                place_element(cell)
+    else:
+        place_element(coord)
+    _place_last_coord = _stroke_last_coord = coord
 
 def _cursor_coord() -> Coord:
     """光标所在格（撤销 delta 要按格登记，故坐标与数据各取一个助手）。"""
@@ -1921,7 +1986,14 @@ def zoom_camera(wheel_y: int) -> None:
     global zoom, camera_x, camera_y
     mouse_x, mouse_y = pygame.mouse.get_pos()
     old_zoom = zoom
-    zoom = max(MIN_ZOOM, min(zoom + wheel_y * ZOOM_STEP, MAX_ZOOM))
+    # 等比缩放：向上滚放大(除以 0.8，即 x1.25)，向下滚缩小(乘以 0.8)，倍率呈等比数列，手感平滑
+    if wheel_y > 0:
+        factor = 1.0 / ZOOM_FACTOR
+    elif wheel_y < 0:
+        factor = ZOOM_FACTOR
+    else:
+        return
+    zoom = max(MIN_ZOOM, min(zoom * factor, MAX_ZOOM))
     camera_x += mouse_x * (1 / old_zoom - 1 / zoom)
     camera_y += mouse_y * (1 / old_zoom - 1 / zoom)
     clamp_camera()
@@ -1948,7 +2020,7 @@ def pan_camera(dt: float) -> None:
 def handle_event(event):
     """处理一个事件并派发到对应动作；返回 False 表示要退出主循环。"""
     global current_tool, WINDOW_WIDTH, WINDOW_HEIGHT, is_dragging, delete_held
-    global place_held, _place_last_coord, place_rot
+    global place_held, _place_last_coord, _stroke_last_coord, place_rot
     global last_mouse_pos, screen_state, _game_esc_time, perf_visible, paused
     if event.type == pygame.QUIT:
         return False
@@ -1984,9 +2056,11 @@ def handle_event(event):
         elif event.button == PLACE_BTN:
             place_held = False
             _place_last_coord = None
+            _stroke_last_coord = None
             _stroke_commit()
         elif event.button == ERASE_BTN:
             delete_held = False
+            _stroke_last_coord = None
             _stroke_commit()
     elif event.type == pygame.MOUSEMOTION:
         buttons = event.buttons
@@ -2408,7 +2482,7 @@ _tut_content_h = 0
 
 _MENU_ICON_POOL = (
     'laser_off', 'mirror_off', 'splitter_off', 'coupler_off',
-    'and_gate_off', 'latch_off', 'delay_line_off', 'wall',
+    'and_gate_off', 'latch_off', 'delay_line_off', 'wall_off',
 )
 _menu_bg_cache = {}
 _menu_decor = {}
@@ -2420,8 +2494,8 @@ _menu_decor_last = -1
 
 def _build_bg_gradient(win_w, win_h, with_grid=True) -> pygame.Surface:
     """全文件唯一的「氛围底」渲染逻辑：竖向渐变（顶部 COLOR_BG -> 底部略偏蓝），
-    可选叠加一层与主画面同距的淡网格。主界面氛围背景与沙盘画面的光晕共用这一个函数，
-    保证两边色调完全同源。纯现算，不新增色常量。"""
+    可选叠加一层与主画面同距的网格，其颜色直接取 COLOR_GRID，与沙盒活动网格同源，
+    保证主界面与沙盒的网格线、蓝色迷雾色调完全一致。纯现算，不新增色常量。"""
     surf = pygame.Surface((win_w, win_h))
     top = COLOR_BG
     bot = tuple(max(0, min(255, top[i] + add)) for i, add in enumerate((0, 8, 28)))
@@ -2435,7 +2509,9 @@ def _build_bg_gradient(win_w, win_h, with_grid=True) -> pygame.Surface:
              max(0, min(255, int(top[2] + (bot[2] - top[2]) * r)))),
             (0, y), (win_w, y))
     if with_grid:
-        gc = tuple(max(0, min(255, int((COLOR_BG[i] + COLOR_GRID[i]) / 2))) for i in range(3))
+        # 网格线颜色与沙盒活动网格完全同源（直接取 COLOR_GRID），
+        # 让主界面与沙盒的网格线及蓝色迷雾观感一致，不再取 BG/GRID 中间色。
+        gc = COLOR_GRID
         step = BASE_CELL_SIZE
         for gx in range(0, win_w, step):
             pygame.draw.line(surf, gc, (gx, 0), (gx, win_h), 1)
@@ -2624,7 +2700,7 @@ def build_tutorial_sections():
             ('', trans('tut.play.hold', undo=_key_label(KEYMAP['undo']))),
         ]),
         (trans('tut.sec.elements'), [
-            ('wall', trans('tut.el.wall')),
+            ('wall_off', trans('tut.el.wall')),
             ('laser_off', trans('tut.el.laser')),
             ('mirror_off', trans('tut.el.mirror')),
             ('splitter_off', trans('tut.el.splitter')),
@@ -2766,13 +2842,13 @@ def _draw_tutorial() -> None:
 
 def _rebuild_icons() -> None:
     """按当前全局色重烘所有元件图标帧，并清空缩放缓存（换肤后图标须随色更新）。"""
-    for _name, _maker in (('laser', _make_laser_icon), ('mirror', _make_mirror_icon),
+    for _name, _maker in (('wall', _make_wall_icon), ('laser', _make_laser_icon),
+                          ('mirror', _make_mirror_icon),
                           ('splitter', _make_splitter_icon), ('coupler', _make_coupler_icon),
                           ('and_gate', _make_and_gate_icon), ('latch', _make_latch_icon),
                           ('delay_line', _make_delay_line_icon)):
         for _suffix, _color in (('_on', COLOR_ON), ('_off', COLOR_OFF)):
             ICONS[_name + _suffix] = _icon_frames(_maker(_color))
-    ICONS['wall'] = _icon_frames(_make_wall_icon(COLOR_OFF))
     ICONS['off_mark'] = _icon_frames(_make_off_mark_icon(COLOR_ON))
     _SCALED_CACHE.clear()
 
@@ -2823,13 +2899,20 @@ def _load_settings() -> None:
                         KEYMAP[aid] = v
     except Exception:
         pass
+_SET_TAB_TOP = 34      # 选项条(子菜单)距面板上边框的内边距
+_SET_OPT_TOP = 114     # 选项列表首行距面板上边框的内边距(历史保留)
+_SET_LIST_TOP = 112    # 各子页列表可视区上沿距面板上边框的内边距
+_SET_LIST_BOTTOM_IN = 46  # 可视区下沿距面板下边框的内边距(给底部提示行留位)
+_SET_TITLE_UP = 84     # 「设置」标题距面板上边框的向上偏移(值越大标题越靠屏幕顶部)
+
+
 def _settings_layout():
     """设置页面板几何：与教学页同款（同尺寸、同内边距），保证两页背景与面板一致。"""
     win_w, win_h = screen.get_size()
     panel_w = min(760, win_w - 80)
     panel_x = win_w // 2 - panel_w // 2
-    panel_y = 76
-    panel_h = win_h - 76 - 46
+    panel_y = 112
+    panel_h = win_h - panel_y - 46
     return win_w, win_h, panel_x, panel_y, panel_w, panel_h
 
 
@@ -2848,30 +2931,60 @@ def _settings_tab_rects():
     labels = settings_tab_labels()
     n = max(1, len(labels))
     bw = (inner_w - 16 * (n - 1)) // n
-    y = panel_y + 70
+    y = panel_y + _SET_TAB_TOP
     rects = []
     for _i, (_tid, _lbl) in enumerate(labels):
         rects.append((_tid, pygame.Rect(inner_x + _i * (bw + 16), y, bw, 40)))
     return rects
-def _keys_metrics():
-    """键位子页可视区与内容几何：固定行高，内容可超出可视区，由 settings_scroll 上下滚动。"""
+# 各子页列表的行高与步距集中在此，新增子页只需再加一个 metrics 包装函数。
+_KEYS_ROW_H, _KEYS_PITCH = 34, 42
+_CARD_ROW_H, _CARD_PITCH = 72, 90      # 主题 / 语言这类大卡片行
+
+def _settings_list_metrics(row_h: int, pitch: int, n: int):
+    """设置页子页通用列表几何。
+
+    列表内容高度 = n * pitch，可视区为 [top, bottom]；内容超出可视区时由
+    settings_scroll 负责上下滚动，未超出时滚动量会被钳为 0(列表保持原位)。
+    返回 (inner_x, inner_w, top, bottom, row_h, pitch, total_h, view_h)。
+    """
     win_w, win_h, panel_x, panel_y, panel_w, panel_h = _settings_layout()
     inner_x = panel_x + 32
     inner_w = panel_w - 64
-    top = panel_y + 148
-    bottom = panel_y + panel_h - 46
-    n = len(KEY_ACTION_LABELS)
-    row_h = 34
-    pitch = 42
-    total_h = n * pitch
+    top = panel_y + _SET_LIST_TOP
+    bottom = panel_y + panel_h - _SET_LIST_BOTTOM_IN
+    total_h = max(0, n) * pitch
     view_h = max(0, bottom - top)
     return inner_x, inner_w, top, bottom, row_h, pitch, total_h, view_h
 
-def _clamp_keys_scroll() -> None:
-    """把键位滚动量限制在 [0, 内容超出可视区的高度] 之间。"""
+def _keys_metrics():
+    """键位子页可视区与内容几何：固定行高，内容可超出可视区，由 settings_scroll 上下滚动。"""
+    return _settings_list_metrics(_KEYS_ROW_H, _KEYS_PITCH, len(KEY_ACTION_LABELS))
+
+def _theme_metrics():
+    """主题子页可视区与内容几何(同样支持滚动，为未来新增主题预留)。"""
+    return _settings_list_metrics(_CARD_ROW_H, _CARD_PITCH, len(THEME_ORDER))
+
+def _language_metrics():
+    """语言子页可视区与内容几何(同样支持滚动，为未来新增语言预留)。"""
+    return _settings_list_metrics(_CARD_ROW_H, _CARD_PITCH, len(TEXTS))
+
+def _tab_metrics():
+    """当前子页对应的列表几何。"""
+    if settings_tab == 'keys':
+        return _keys_metrics()
+    if settings_tab == 'language':
+        return _language_metrics()
+    return _theme_metrics()
+
+def _clamp_settings_scroll() -> None:
+    """把当前子页的滚动量限制在 [0, 内容超出可视区的高度] 之间。"""
     global settings_scroll
-    _ix, _iw, _top, _bot, _rh, _pitch, total_h, view_h = _keys_metrics()
+    _ix, _iw, _top, _bot, _rh, _pitch, total_h, view_h = _tab_metrics()
     settings_scroll = max(0.0, min(settings_scroll, float(max(0, total_h - view_h))))
+
+def _clamp_keys_scroll() -> None:
+    """兼容旧调用名，等价于 _clamp_settings_scroll()。"""
+    _clamp_settings_scroll()
 
 def _key_option_rects():
     """键位子页：每个可绑定动作独占一行（单列、固定行高），坐标已套用当前滚动偏移。"""
@@ -2903,16 +3016,15 @@ def _bind_key(aid: str, key: int) -> None:
     apply_keymap()
     _save_settings()
 def _theme_option_rects():
-    """按当前窗口尺寸返回 [(主题名, 可点击矩形)]，供绘制与命中测试共用同一套坐标。"""
-    win_w, win_h, panel_x, panel_y, panel_w, panel_h = _settings_layout()
-    inner_x = panel_x + 32
-    inner_w = panel_w - 64
-    row_h, gap = 72, 18
-    y = panel_y + 150
+    """按当前窗口尺寸返回 [(主题名, 可点击矩形)]，供绘制与命中测试共用同一套坐标。
+
+    坐标已套用 settings_scroll 偏移，因此内容超出可视区时可随滚轮上下移动。
+    """
+    inner_x, inner_w, top, bottom, row_h, pitch, total_h, view_h = _theme_metrics()
     rects = []
-    for name in THEME_ORDER:
+    for i, name in enumerate(THEME_ORDER):
+        y = int(top + i * pitch - settings_scroll)
         rects.append((name, pygame.Rect(inner_x, y, inner_w, row_h)))
-        y += row_h + gap
     return rects
 
 
@@ -2921,7 +3033,7 @@ def _draw_settings() -> None:
     _draw_ambient_menu(pygame.time.get_ticks())
     win_w, win_h, panel_x, panel_y, panel_w, panel_h = _settings_layout()
     title = MENU_FONT_BTN.render(trans('menu.settings'), True, COLOR_ON)
-    screen.blit(title, (win_w // 2 - title.get_width() // 2, 22))
+    screen.blit(title, (win_w // 2 - title.get_width() // 2, panel_y - _SET_TITLE_UP))
     panel = pygame.Surface((panel_w, panel_h), pygame.SRCALPHA)
     panel.fill(_tint(COLOR_BG, 226))
     screen.blit(panel, (panel_x, panel_y))
@@ -2948,6 +3060,10 @@ def _draw_settings_theme(panel_x, panel_y, panel_w, panel_h) -> None:
     """主题子页：配色可选列表 + 当前主题色块。"""
     # head = MENU_FONT_SEC.render('THEME', True, COLOR_ON)
     # screen.blit(head, (panel_x + 32, panel_y + 118))
+    _clamp_settings_scroll()
+    _ix, _iw, _top, _bot, _rh, _pitch, _th, _vh = _theme_metrics()
+    prev_clip = screen.get_clip()
+    screen.set_clip(pygame.Rect(_ix, _top, _iw, _vh))
     for name, rect in _theme_option_rects():
         active = (name == current_theme)
         bg = pygame.Surface((rect.w, rect.h), pygame.SRCALPHA)
@@ -2969,6 +3085,7 @@ def _draw_settings_theme(panel_x, panel_y, panel_w, panel_h) -> None:
                              (sx, rect.centery - sw_size // 2, sw_size, sw_size), 1,
                              border_radius=4)
             sx += sw_size + 8
+    screen.set_clip(prev_clip)
     cur = MENU_FONT_SUB.render(trans('set.active', name=theme_display(current_theme)), True, COLOR_OFF)
     screen.blit(cur, (panel_x + 32, panel_y + panel_h - 34))
 def _draw_settings_keys(panel_x, panel_y, panel_w, panel_h) -> None:
@@ -3011,21 +3128,21 @@ def _draw_settings_keys(panel_x, panel_y, panel_w, panel_h) -> None:
         hint = MENU_FONT_SUB.render(trans('set.keybind.hint'), True, COLOR_OFF)
     screen.blit(hint, (panel_x + 32, panel_y + panel_h - 34))
 def _language_option_rects():
-    """语言子页：每种语言一行可点击矩形。"""
-    win_w, win_h, panel_x, panel_y, panel_w, panel_h = _settings_layout()
-    inner_x = panel_x + 32
-    inner_w = panel_w - 64
-    row_h, gap = 72, 18
-    y = panel_y + 150
+    """语言子页：每种语言一行可点击矩形(坐标已套用滚动偏移)。"""
+    inner_x, inner_w, top, bottom, row_h, pitch, total_h, view_h = _language_metrics()
     rects = []
-    for lang in TEXTS:
+    for i, lang in enumerate(TEXTS):
+        y = int(top + i * pitch - settings_scroll)
         rects.append((lang, pygame.Rect(inner_x, y, inner_w, row_h)))
-        y += row_h + gap
     return rects
 
 
 def _draw_settings_language(panel_x, panel_y, panel_w, panel_h) -> None:
-    """语言子页：语言可选列表 + 当前语言。"""
+    """语言子页：语言可选列表 + 当前语言；内容超出可视区时上下滚动。"""
+    _clamp_settings_scroll()
+    _ix, _iw, _top, _bot, _rh, _pitch, _th, _vh = _language_metrics()
+    prev_clip = screen.get_clip()
+    screen.set_clip(pygame.Rect(_ix, _top, _iw, _vh))
     for lang, rect in _language_option_rects():
         active = (lang == _LANG)
         bg = pygame.Surface((rect.w, rect.h), pygame.SRCALPHA)
@@ -3036,6 +3153,7 @@ def _draw_settings_language(panel_x, panel_y, panel_w, panel_h) -> None:
         label = MENU_FONT_SEC.render(_LANG_LABELS.get(lang, lang), True,
                                      COLOR_ON if active else COLOR_OFF)
         screen.blit(label, (rect.x + 24, rect.centery - label.get_height() // 2))
+    screen.set_clip(prev_clip)
     cur = MENU_FONT_SUB.render(trans('set.active', name=_LANG_LABELS.get(_LANG, _LANG)),
                                True, COLOR_OFF)
     screen.blit(cur, (panel_x + 32, panel_y + panel_h - 34))
@@ -3048,9 +3166,10 @@ def handle_settings_event(event) -> None:
     if event.type == pygame.VIDEORESIZE:
         WINDOW_WIDTH, WINDOW_HEIGHT = event.w, event.h
         return
-    if event.type == pygame.MOUSEWHEEL and settings_tab == 'keys':
+    if event.type == pygame.MOUSEWHEEL:
+        # 主题 / 键位 / 语言三个子页共用同一套滚动；内容不超出可视区时自动钳为 0
         settings_scroll += -15.0 * event.y
-        _clamp_keys_scroll()
+        _clamp_settings_scroll()
         return
     if event.type == pygame.KEYDOWN and settings_listen is not None:
         if event.key == KEY_BACK:
@@ -3070,14 +3189,20 @@ def handle_settings_event(event) -> None:
                 settings_scroll = 0.0
                 return
         if settings_tab == 'theme':
+            _tx, _tw, _ttop, _tbot, _trh, _tp, _tth, _tvh = _theme_metrics()
             for name, rect in _theme_option_rects():
+                if rect.bottom <= _ttop or rect.top >= _tbot:
+                    continue
                 if rect.collidepoint(event.pos):
                     if name != current_theme:
                         _apply_theme(name)
                         _save_settings()
                     return
         elif settings_tab == 'language':
+            _lx, _lw, _ltop, _lbot, _lrh, _lp, _lth, _lvh = _language_metrics()
             for lang, rect in _language_option_rects():
+                if rect.bottom <= _ltop or rect.top >= _lbot:
+                    continue
                 if rect.collidepoint(event.pos):
                     if lang != _LANG:
                         set_lang(lang)
@@ -3120,21 +3245,32 @@ def handle_settings_event(event) -> None:
             elif event.key == pygame.K_DOWN:
                 settings_scroll += 42
                 _clamp_keys_scroll()
+        else:
+            # 语言子页：上下键滚动列表(内容未超出时钳制为 0，不会产生位移)
+            if event.key == pygame.K_UP:
+                settings_scroll -= _CARD_PITCH / 2.0
+                _clamp_settings_scroll()
+            elif event.key == pygame.K_DOWN:
+                settings_scroll += _CARD_PITCH / 2.0
+                _clamp_settings_scroll()
 
 _PERF: Dict[str, float] = {'solve_ms': 0.0}
 perf_visible = False
 PERF_FONT = _load_font(14)
 
 def _draw_perf_panel() -> None:
-    """左上角半透明读数框，两列布局。
+    """左上角半透明读数框，三列布局。
     左列：FPS、每刻求解耗时(ms)、撤销栈深/上限。
-    右列：当前方块(元件)个数、鼠标所对方块坐标、放大倍数。"""
+    中列：当前方块(元件)个数、鼠标所对方块坐标、放大倍数。
+    右列：鼠标指向方块的详情——种类(type)、方向(dir)、状态(state)。"""
     mouse_pos = pygame.mouse.get_pos()
+    point_data = None
     if _is_ui_pos(mouse_pos):
         hover_txt = ' -- , -- '
     else:
         hr, hc = screen_to_grid(*mouse_pos)
         hover_txt = 'r%-4d c%-4d' % (hr, hc)
+        point_data = grid_data.get((hr, hc))
     col1 = (
         'FPS   %5.1f' % clock.get_fps(),
         'solve %6.2f ms' % _PERF['solve_ms'],
@@ -3145,11 +3281,31 @@ def _draw_perf_panel() -> None:
         'mouse %s' % hover_txt,
         'zoom  %.2fx' % zoom,
     )
+    # 第三列：鼠标所对方块的信息。dir 与 STEP_BY_DIR 对齐(0上/1右/2下/3左)。
+    _dir_words = ('up', 'right', 'down', 'left')
+    if point_data is None:
+        col3 = ('type  --', 'dir   --', 'state --')
+    else:
+        _t = point_data.get('type', '?')
+        _d = int(point_data.get('dir', 0)) % 4
+        _state = 'LIT' if point_data.get('is_lit', False) else 'off'
+        if _t == 'laser':
+            _state += ' / sw:' + ('on' if point_data.get('is_on', True) else 'off')
+        elif _t == 'latch':
+            _state += ' / mem:' + str(int(point_data.get('state', 0)))
+        elif _t == 'delay_line':
+            _state += ' / n:' + str(int(point_data.get('ticks', 0)))
+        col3 = (
+            'type  %s' % _t,
+            'dir   %s(%d)' % (_dir_words[_d], _d),
+            'state %s' % _state,
+        )
     pad, line_h, col_gap = 6, 18, 16
     col1_w = max(PERF_FONT.size(s)[0] for s in col1)
     col2_w = max(PERF_FONT.size(s)[0] for s in col2)
-    box_w = pad * 2 + col1_w + col_gap + col2_w
-    box_h = pad * 2 + line_h * max(len(col1), len(col2))
+    col3_w = max(PERF_FONT.size(s)[0] for s in col3)
+    box_w = pad * 2 + col1_w + col_gap + col2_w + col_gap + col3_w
+    box_h = pad * 2 + line_h * max(len(col1), len(col2), len(col3))
     box = pygame.Surface((box_w, box_h), pygame.SRCALPHA)
     box.fill(_tint(COLOR_BG, 190))
     screen.blit(box, (10, 10))
@@ -3161,6 +3317,10 @@ def _draw_perf_panel() -> None:
     for i, line in enumerate(col2):
         screen.blit(PERF_FONT.render(line, True, COLOR_ON),
                     (col2_x, 10 + pad + i * line_h))
+    col3_x = col2_x + col2_w + col_gap
+    for i, line in enumerate(col3):
+        screen.blit(PERF_FONT.render(line, True, COLOR_ON),
+                    (col3_x, 10 + pad + i * line_h))
 
 #======================================================================
 #  主循环 main：固定 60 FPS 的 事件 -> 推进 -> 渲染
