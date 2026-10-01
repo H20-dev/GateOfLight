@@ -105,6 +105,7 @@ pyinstaller -F -w -i GateOfLight.ico -n GateOfLight.exe --add-data "GateOfLight.
 
 ## 文件说明
 
-- `GateOfLight_no_comments.py`：去注释版源码，移除全部 `#` 行内注释与整行注释；
-  docstring 作为字符串常量予以保留，语法校验通过，可直接运行。
-- `README.md`：本说明文件。
+- `script.py`：去注释版源码；
+- `README.md`：本说明文件；
+- `SourceHanSansSC.otf`：中文字体包；
+- `GateOfLight.ico`：应用图标。
