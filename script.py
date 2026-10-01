@@ -1,3 +1,8 @@
+
+
+
+
+
 import bisect
 import copy
 import ctypes
@@ -69,7 +74,7 @@ ICON_BAR_LEN = int(ICON_SIZE * 0.88)
 ICON_BAR_W = max(2, int(ICON_SIZE * 0.08))
 ICON_BAR_GAP = int(ICON_SIZE * 0.22)
 ICON_RING_R, ICON_RING_W = int(ICON_SIZE * 0.4), int(ICON_SIZE * 0.12)
-ICON_LATCH_R, ICON_LATCH_CORE = int(ICON_SIZE * 0.4), int(ICON_SIZE * 0.25)
+ICON_LATCH_R, ICON_LATCH_CORE = int(ICON_SIZE * 0.4), int(ICON_SIZE * 0.2)
 
 HOTBAR_CELL = 60
 HOTBAR_GAP = 6
@@ -79,7 +84,7 @@ PLACE_BTN = 3
 ERASE_BTN = 1
 
 SAVE_VERSION = 1
-SAVE_SLOTS = (1,)
+SAVE_SLOTS = (1, 2, 3, 4, 5)
 MAX_CELLS_LIMIT = 200000
 UNDO_LIMIT = 200
 MESSAGE_TTL_S = 4.0
@@ -102,8 +107,14 @@ KEY_SAVE_SLOT_BASE = pygame.K_F1
 KEY_SAVE_SLOTS = (pygame.K_F1,)
 SAVE_SLOT_KEYS = {pygame.K_F1: 1}
 KEY_LOAD_SLOT = pygame.K_F2
+KEY_SAVE_MENU = pygame.K_F1
 KEY_TOGGLE_PERF = pygame.K_F12
 KEY_BACK = pygame.K_ESCAPE
+KEY_SL_SAVE = pygame.K_RETURN
+KEY_SL_LOAD = pygame.K_l
+KEY_SL_RENAME = pygame.K_r
+KEY_SL_DELETE = pygame.K_DELETE
+KEY_SL_NEW = pygame.K_n
 KEY_PAN_LEFT = pygame.K_LEFT
 KEY_PAN_RIGHT = pygame.K_RIGHT
 KEY_PAN_UP = pygame.K_UP
@@ -127,6 +138,11 @@ _DEFAULT_KEYS = {
     'pause': KEY_TOGGLE_PAUSE,
     'perf': KEY_TOGGLE_PERF,
     'save_1': pygame.K_F1,
+    'sl_save': KEY_SL_SAVE,
+    'sl_load': KEY_SL_LOAD,
+    'sl_rename': KEY_SL_RENAME,
+    'sl_delete': KEY_SL_DELETE,
+    'sl_new': KEY_SL_NEW,
     'load': KEY_LOAD_SLOT,
     'pan_up': KEY_PAN_UP,
     'pan_down': KEY_PAN_DOWN,
@@ -175,6 +191,12 @@ def apply_keymap() -> None:
     g['KEY_TOGGLE_PAUSE'] = KEYMAP['pause']
     g['KEY_TOGGLE_PERF'] = KEYMAP['perf']
     g['KEY_LOAD_SLOT'] = KEYMAP['load']
+    g['KEY_SAVE_MENU'] = KEYMAP['save_1']
+    g['KEY_SL_SAVE'] = KEYMAP['sl_save']
+    g['KEY_SL_LOAD'] = KEYMAP['sl_load']
+    g['KEY_SL_RENAME'] = KEYMAP['sl_rename']
+    g['KEY_SL_DELETE'] = KEYMAP['sl_delete']
+    g['KEY_SL_NEW'] = KEYMAP['sl_new']
     g['TOOL_KEY_MAP'] = {KEYMAP['tool_%d' % i]: i for i in range(len(TOOL_TYPES))}
     g['KEY_SAVE_SLOTS'] = tuple(KEYMAP['save_%d' % i] for i in (1,))
     g['SAVE_SLOT_KEYS'] = {KEYMAP['save_%d' % i]: i for i in (1,)}
@@ -234,6 +256,20 @@ clock = pygame.time.Clock()
 
 def _tint(color, alpha):
     return (color[0], color[1], color[2], alpha)
+
+
+def _draw_scrollbar(track_rect, total_h, view_h, scroll):
+    """统一滚动条样式（以 F1 存档界面为准）：
+    轨道 COLOR_OFF@70、滑块 COLOR_ON、宽 6、滑块最小 24px。"""
+    if view_h <= 0 or total_h <= view_h:
+        return
+    pygame.draw.rect(screen, _tint(COLOR_OFF, 70), track_rect)
+    ratio = view_h / float(total_h)
+    thumb_h = max(24, int(track_rect.h * min(1.0, ratio)))
+    mx = max(1.0, float(total_h - view_h))
+    thumb_y = track_rect.y + int((track_rect.h - thumb_h) * (scroll / mx))
+    pygame.draw.rect(screen, COLOR_ON,
+                     (track_rect.x, thumb_y, track_rect.w, thumb_h))
 
 camera_x = -round(WINDOW_WIDTH / 2.0 / BASE_CELL_SIZE) * BASE_CELL_SIZE
 camera_y = -round(WINDOW_HEIGHT / 2.0 / BASE_CELL_SIZE) * BASE_CELL_SIZE
@@ -363,6 +399,7 @@ TEXTS = {
         'tut.play.move': '{pan} move   {alt} alt move   MMB drag',
         'tut.play.undo': '{undo} undo  {redo} redo   {del_} erase',
         'tut.play.save': '{save} save   {load} load   {paste} stamp-paste',
+        'tut.play.sl': 'Save panel: open it, then operate only with the mouse (Save / Load / Rename / Delete / New buttons); Delete needs a second confirming click.',
         'tut.play.misc': '{pause} pause/resume',
         'tut.play.esc': 'ESC x2 returns to menu   ESC quit from menu',
         'tut.play.solver': 'solver recomputes only on change',
@@ -435,6 +472,7 @@ TEXTS = {
         'tut.play.move': '{pan} 平移   {alt} 备用平移   中键拖拽',
         'tut.play.undo': '{undo} 撤销  {redo} 重做   {del_} 擦除',
         'tut.play.save': '{save} 保存   {load} 读取   {paste} 图章粘贴',
+        'tut.play.sl': '存档界面：全部用鼠标点击按钮操作（保存/读取/重命名/删除/新建），不使用快捷键；删除需再点一次确认。',
         'tut.play.misc': '{pause} 暂停/继续',
         'tut.play.esc': '连按两次 ESC 返回主菜单   主菜单按 ESC 退出程序',
         'tut.play.solver': '求解器仅在场景改动时重新计算',
@@ -483,6 +521,51 @@ THEME_LABEL_KEYS = {
 def theme_display(name):
     return trans(THEME_LABEL_KEYS.get(name, name))
 
+TEXTS['en'].update({
+    'key.save_1': 'Save/Load menu',
+    'key.sl_save': 'Save panel: save', 'key.sl_load': 'Save panel: load',
+    'key.sl_rename': 'Save panel: rename',
+    'key.sl_delete': 'Save panel: delete',
+    'key.sl_new': 'Save panel: new save',
+    'sl.title': 'Save / Load', 'sl.slot': 'Slot {slot}',
+    'sl.empty': 'empty', 'sl.cells': '{cells} components', 'sl.bad': 'corrupted',
+    'sl.btn.save': 'Save', 'sl.btn.load': 'Load', 'sl.btn.del': 'Delete',
+    'sl.btn.del.confirm': 'Confirm?',
+    'sl.btn.rename': 'Rename',
+    'sl.cur': 'world: {cells} components{dirty}', 'sl.dirty': '  (unsaved)',
+    'sl.hint': 'Click a row to select  ·  click the buttons to Save / Load / Rename / Delete / New  ·  wheel to scroll  ·  click outside or {cl}/ESC to close',
+    'note.deleted': 'deleted save "{slot}"',
+    'note.del_fail': 'delete slot {slot} FAILED: {err}',
+    'sl.new': '+ New',
+    'sl.default_name': 'Save {slot}',
+    'sl.count': '{n} save(s) total',
+    'sl.edit.tip': 'type name   Enter confirm   Esc cancel',
+    'note.renamed': 'renamed to "{name}"',
+    'note.rename_fail': 'rename FAILED: {err}',
+})
+TEXTS['zh'].update({
+    'key.save_1': '存档/读档',
+    'key.sl_save': '存档界面：保存', 'key.sl_load': '存档界面：读取',
+    'key.sl_rename': '存档界面：重命名',
+    'key.sl_delete': '存档界面：删除',
+    'key.sl_new': '存档界面：新建存档',
+    'sl.title': '存档 · 读档', 'sl.slot': '槽位 {slot}',
+    'sl.empty': '空', 'sl.cells': '{cells} 个元件', 'sl.bad': '已损坏',
+    'sl.btn.save': '保存', 'sl.btn.load': '读取', 'sl.btn.del': '删除',
+    'sl.btn.del.confirm': '确认?',
+    'sl.btn.rename': '重命名',
+    'sl.cur': '当前世界：{cells} 个元件{dirty}', 'sl.dirty': '  （未保存）',
+    'sl.hint': '点击一行选中  ·  点右侧按钮操作：保存 / 读取 / 重命名 / 删除 / 新建  ·  滚轮滚动  ·  点空白处或 {cl}/ESC 关闭',
+    'note.deleted': '已删除存档“{slot}”',
+    'note.del_fail': '删除槽位 {slot} 失败：{err}',
+    'sl.new': '＋ 新建',
+    'sl.default_name': '存档 {slot}',
+    'sl.count': '共 {n} 个存档',
+    'sl.edit.tip': '输入名称   回车 确认   Esc 取消',
+    'note.renamed': '已重命名为“{name}”',
+    'note.rename_fail': '重命名失败：{err}',
+})
+
 def trans(key, **kw):
     table = TEXTS.get(_LANG) or TEXTS['en']
     s = table.get(key)
@@ -512,7 +595,7 @@ def build_key_action_labels():
            ('paste', trans('key.paste')), ('pause', trans('key.pause')),
            ('perf', trans('key.perf'))]
         + [('save_1', trans('key.save_1'))]
-        + [('load', trans('key.load')), ('pan_up', trans('key.pan_up')),
+        + [('pan_up', trans('key.pan_up')),
            ('pan_down', trans('key.pan_down')),
            ('pan_left', trans('key.pan_left')), ('pan_right', trans('key.pan_right')),
            ('pan_up_alt', trans('key.pan_up_alt')), ('pan_down_alt', trans('key.pan_down_alt')),
@@ -1685,7 +1768,9 @@ def handle_event(event):
     if event.type == pygame.VIDEORESIZE:
         WINDOW_WIDTH, WINDOW_HEIGHT = event.w, event.h
         clamp_camera()
-    elif event.type == pygame.MOUSEBUTTONDOWN:
+    if _saveload_open:
+        return _handle_saveload_event(event)
+    if event.type == pygame.MOUSEBUTTONDOWN:
         hb_idx = hotbar_index_at(event.pos)
         if hb_idx is not None:
             if event.button == 1:
@@ -1746,8 +1831,8 @@ def handle_event(event):
             undo()
         elif event.key == KEY_REDO:
             redo()
-        elif event.key in SAVE_SLOT_KEYS:
-            save_slot(SAVE_SLOT_KEYS[event.key])
+        elif event.key == KEY_SAVE_MENU:
+            _open_saveload()
         elif event.key == KEY_LOAD_SLOT:
             load_recent_slot()
         elif event.key == KEY_TOGGLE_PERF:
@@ -1773,6 +1858,14 @@ world_dirty = False
 last_slot = 0
 _last_slot_by_mtime = 0
 save_status: Dict[int, str] = {}
+
+_slot_meta: Dict[int, dict] = {}
+_slot_names: Dict[int, str] = {}
+_sl_slots: List[int] = []
+_sl_scroll: int = 0
+_sl_edit_slot: int = -1
+_sl_edit_buf: str = ''
+_sl_del_confirm_slot: int = -1
 _message = ''
 _message_until = 0.0
 
@@ -1783,6 +1876,58 @@ def _note(msg: str) -> None:
 
 def _slot_path(slot: int) -> str:
     return os.path.join(SAVE_DIR, 'slot%d.json' % slot)
+
+def _discover_slots() -> List[int]:
+    found = set()
+    try:
+        names = os.listdir(SAVE_DIR)
+    except OSError:
+        return []
+    for fn in names:
+        if fn.startswith('slot') and fn.endswith('.json'):
+            core = fn[4:-5]
+            if core.isdigit():
+                found.add(int(core))
+    return sorted(found)
+
+def _next_free_slot() -> int:
+    used = set(_discover_slots()) | set(_slot_names.keys())
+    n = 1
+    while n in used:
+        n += 1
+    return n
+
+def _slot_display_name(slot: int) -> str:
+    nm = _slot_names.get(slot)
+    if isinstance(nm, str) and nm.strip():
+        return nm.strip()
+    return trans('sl.default_name', slot=slot)
+
+def _rename_slot(slot: int, new_name: str) -> bool:
+    try:
+        slot = int(slot)
+    except (TypeError, ValueError):
+        return False
+    clean = (new_name or '').strip()[:32]
+    final = clean or trans('sl.default_name', slot=slot)
+    _slot_names[slot] = final
+    path = _slot_path(slot)
+    if os.path.exists(path):
+        try:
+            with open(path, 'r', encoding='utf-8') as fh:
+                doc = json.load(fh)
+            if not isinstance(doc, dict):
+                doc = {'cells': {}}
+            doc['name'] = final
+            with open(path + '.tmp', 'w', encoding='utf-8') as fh:
+                json.dump(doc, fh, ensure_ascii=False, separators=(',', ':'))
+            os.replace(path + '.tmp', path)
+        except (OSError, ValueError) as exc:
+            _note(trans('note.rename_fail', err=exc))
+            return False
+    _note(trans('note.renamed', name=final))
+    _refresh_slot_status()
+    return True
 
 def _encode_levels(value):
     return -1 if value is None else sorted(int(d) for d in value)
@@ -1856,12 +2001,16 @@ def _try_float(value, fallback: float) -> float:
         return fallback
 
 def _refresh_slot_status():
-    global _last_slot_by_mtime
+    global _last_slot_by_mtime, _sl_slots
+    union = set(_discover_slots()) | set(int(s) for s in _slot_names.keys())
+    slots = sorted(s for s in union if s and s > 0)
+    _sl_slots = slots
     newest_mtime, newest_slot = 0.0, 0
-    for slot in SAVE_SLOTS:
+    for slot in slots:
         path = _slot_path(slot)
         if not os.path.exists(path):
             save_status[slot] = '%d:-' % slot
+            _slot_meta[slot] = {'cells': 0, 'mtime': 0.0}
             continue
         try:
             mtime = os.path.getmtime(path)
@@ -1873,28 +2022,43 @@ def _refresh_slot_status():
             count = sum(1 for v in raw.values()
                         if isinstance(v, dict) and v.get('type') in TOOL_SPECS)
             save_status[slot] = '%d:%dc' % (slot, count)
+            nm = doc.get('name') if isinstance(doc, dict) else None
+            if isinstance(nm, str) and nm.strip():
+                _slot_names[slot] = nm.strip()
+            _slot_meta[slot] = {'cells': count, 'mtime': mtime}
             if mtime >= newest_mtime:
                 newest_mtime, newest_slot = mtime, slot
         except (ValueError, OSError, TypeError, AttributeError):
             save_status[slot] = '%d:BAD' % slot
+            _slot_meta[slot] = {'cells': 0, 'mtime': 0.0, 'bad': True}
     _last_slot_by_mtime = newest_slot
 
-def save_slot(slot: int) -> bool:
+def save_slot(slot: int, name=None) -> bool:
     global world_dirty, last_slot
-    if slot not in SAVE_SLOTS:
+    try:
+        slot = int(slot)
+    except (TypeError, ValueError):
         return False
+    if slot <= 0:
+        return False
+    if name is not None:
+        clean = str(name).strip()[:32]
+        _slot_names[slot] = clean or trans('sl.default_name', slot=slot)
+    disp = _slot_display_name(slot)
     try:
         os.makedirs(SAVE_DIR, exist_ok=True)
         path = _slot_path(slot)
+        doc = serialize_world()
+        doc['name'] = disp
         with open(path + '.tmp', 'w', encoding='utf-8') as fh:
-            json.dump(serialize_world(), fh, ensure_ascii=False, separators=(',', ':'))
+            json.dump(doc, fh, ensure_ascii=False, separators=(',', ':'))
         os.replace(path + '.tmp', path)
     except OSError as exc:
         _note(trans('note.save_fail', slot=slot, err=exc))
         return False
     world_dirty = False
     last_slot = slot
-    _note(trans('note.saved', slot=slot, cells=len(grid_data), dir=SAVE_DIR))
+    _note(trans('note.saved', slot=disp, cells=len(grid_data), dir=SAVE_DIR))
     _refresh_slot_status()
     return True
 
@@ -1919,8 +2083,12 @@ def _read_slot(slot: int) -> Tuple[Dict[Coord, dict], dict]:
 def _f4_target_slot() -> int:
     _refresh_slot_status()
     seen: Set[int] = set()
-    for slot in [last_slot, _last_slot_by_mtime] + list(SAVE_SLOTS):
-        if slot in SAVE_SLOTS and slot not in seen:
+    for cand in [last_slot, _last_slot_by_mtime] + list(_sl_slots):
+        try:
+            slot = int(cand)
+        except (TypeError, ValueError):
+            continue
+        if slot > 0 and slot not in seen:
             seen.add(slot)
             if os.path.exists(_slot_path(slot)):
                 return slot
@@ -1929,7 +2097,11 @@ def _f4_target_slot() -> int:
 def load_slot(slot: int) -> bool:
     global grid_data, camera_x, camera_y, zoom, current_tool
     global world_dirty, last_slot, grid_changed, timeline_present
-    if slot not in SAVE_SLOTS:
+    try:
+        slot = int(slot)
+    except (TypeError, ValueError):
+        return False
+    if slot <= 0:
         return False
     try:
         cells, doc = _read_slot(slot)
@@ -1966,7 +2138,11 @@ def load_recent_slot() -> bool:
 
 def paste_slot_at_cursor(slot: int = 0) -> bool:
     global grid_changed, world_dirty, last_slot
-    target = slot if slot in SAVE_SLOTS else _f4_target_slot()
+    try:
+        _slot_int = int(slot)
+    except (TypeError, ValueError):
+        _slot_int = 0
+    target = _slot_int if _slot_int > 0 else _f4_target_slot()
     if not target:
         _note(trans('note.paste_none'))
         return False
@@ -2258,6 +2434,11 @@ def build_tutorial_sections():
                        redo=_key_label(KEYMAP['redo']), del_=_key_label(pygame.K_DELETE))),
             ('', trans('tut.play.save', save=save_rng, load=_key_label(KEYMAP['load']),
                        paste=_key_label(KEYMAP['paste']))),
+            ('', trans('tut.play.sl', sv=_key_label(KEYMAP['sl_save']),
+                       ld=_key_label(KEYMAP['sl_load']),
+                       rn=_key_label(KEYMAP['sl_rename']),
+                       dl=_key_label(KEYMAP['sl_delete']),
+                       nw=_key_label(KEYMAP['sl_new']))),
             ('', trans('tut.play.misc', pause=_key_label(KEYMAP['pause']))),
             ('', trans('tut.play.esc')),
             ('', trans('tut.play.solver')),
@@ -2314,7 +2495,7 @@ def handle_tutorial_event(event) -> None:
     if event.type == pygame.VIDEORESIZE:
         WINDOW_WIDTH, WINDOW_HEIGHT = event.w, event.h
     elif event.type == pygame.MOUSEBUTTONDOWN and event.button in (4, 5):
-        _tut_scroll += 90 if event.button == 4 else -90
+        _tut_scroll += -90 if event.button == 4 else 90
     elif event.type == pygame.KEYDOWN:
         if event.key == KEY_BACK:
             screen_state = 'menu'
@@ -2343,7 +2524,7 @@ def _draw_tutorial() -> None:
     panel_y = 76
     panel_h = win_h - 76 - 46
     panel = pygame.Surface((panel_w, panel_h), pygame.SRCALPHA)
-    panel.fill((0, 0, 0, 0))
+    panel.fill(_tint(COLOR_BG, 255))
     screen.blit(panel, (panel_x, panel_y))
     pygame.draw.rect(screen, COLOR_ON, (panel_x, panel_y, panel_w, panel_h), 2)
 
@@ -2385,12 +2566,8 @@ def _draw_tutorial() -> None:
     screen.blit(canvas, (panel_x + 24, panel_y + 16 - int(_tut_scroll)))
     screen.set_clip(None)
 
-    if total_h > view_h:
-        bar_x = panel_x + panel_w - 14
-        thumb_h = max(30, int(view_h * view_h / total_h))
-        thumb_y = panel_y + 16 + int((panel_h - 32 - thumb_h) *
-                                     (_tut_scroll / max(1, total_h - view_h)))
-        pygame.draw.rect(screen, COLOR_OFF, (bar_x, thumb_y, 5, thumb_h))
+    _draw_scrollbar(pygame.Rect(panel_x + panel_w - 14, panel_y + 16, 6, view_h),
+                    total_h, view_h, _tut_scroll)
 
 def _rebuild_icons() -> None:
     for _name, _maker in (('wall', _make_wall_icon), ('laser', _make_laser_icon),
@@ -2553,7 +2730,7 @@ def _draw_settings() -> None:
     title = MENU_FONT_BTN.render(trans('menu.settings'), True, COLOR_ON)
     screen.blit(title, (win_w // 2 - title.get_width() // 2, panel_y - _SET_TITLE_UP))
     panel = pygame.Surface((panel_w, panel_h), pygame.SRCALPHA)
-    panel.fill(_tint(COLOR_BG, 226))
+    panel.fill(_tint(COLOR_BG, 255))
     screen.blit(panel, (panel_x, panel_y))
     pygame.draw.rect(screen, COLOR_ON, (panel_x, panel_y, panel_w, panel_h), 2)
     label_map = dict(settings_tab_labels())
@@ -2574,6 +2751,9 @@ def _draw_settings() -> None:
         _draw_settings_keys(panel_x, panel_y, panel_w, panel_h)
     else:
         _draw_settings_language(panel_x, panel_y, panel_w, panel_h)
+    _s_ix, _s_iw, _s_top, _s_bot, _s_rh, _s_pitch, _s_th, _s_vh = _tab_metrics()
+    _draw_scrollbar(pygame.Rect(panel_x + panel_w - 14, _s_top, 6, _s_vh),
+                    _s_th, _s_vh, settings_scroll)
 def _draw_settings_theme(panel_x, panel_y, panel_w, panel_h) -> None:
     _clamp_settings_scroll()
     _ix, _iw, _top, _bot, _rh, _pitch, _th, _vh = _theme_metrics()
@@ -2759,6 +2939,368 @@ def handle_settings_event(event) -> None:
                 settings_scroll += _CARD_PITCH / 2.0
                 _clamp_settings_scroll()
 
+_saveload_open = False
+_saveload_sel = 1
+SL_FONT_HEAD = _load_font(30)
+SL_FONT_ROW = _load_font(22)
+SL_FONT_SUB = _load_font(15)
+SL_FONT_BTN = _load_font(18)
+_SL_ROW_H, _SL_ROW_PITCH = 66, 74
+
+
+def _open_saveload() -> None:
+    global _saveload_open, _saveload_sel, _sl_scroll, _sl_edit_slot, _sl_edit_buf, _sl_del_confirm_slot
+    _refresh_slot_status()
+    if _sl_slots:
+        _saveload_sel = last_slot if last_slot in _sl_slots else _sl_slots[0]
+    else:
+        _saveload_sel = 0
+    _sl_scroll = 0
+    _sl_edit_slot, _sl_edit_buf = -1, ''
+    _sl_del_confirm_slot = -1
+    _saveload_open = True
+
+
+_SL_HEADER_H = 112
+_SL_FOOTER_H = 52
+_SL_BTN_W, _SL_BTN_GAP = 72, 6
+
+
+def _sl_geom():
+    win_w, win_h = screen.get_size()
+    panel_w = min(760, max(420, win_w - 60))
+    panel_x = win_w // 2 - panel_w // 2
+    panel_y = 88
+    panel_h = max(320, win_h - panel_y - 30)
+    list_top = panel_y + _SL_HEADER_H
+    list_bottom = panel_y + panel_h - _SL_FOOTER_H
+    nb_w, nb_h = 120, 40
+    new_btn = pygame.Rect(panel_x + panel_w - 28 - nb_w, panel_y + 16, nb_w, nb_h)
+    return {'win_w': win_w, 'win_h': win_h, 'px': panel_x, 'py': panel_y,
+            'pw': panel_w, 'ph': panel_h, 'list_top': list_top,
+            'list_bottom': list_bottom, 'new_btn': new_btn}
+
+
+def _sl_max_scroll(g):
+    total = len(_sl_slots) * _SL_ROW_PITCH
+    return max(0, total - (g['list_bottom'] - g['list_top']))
+
+
+def _sl_clamp_scroll():
+    global _sl_scroll
+    _sl_scroll = max(0, min(_sl_scroll, _sl_max_scroll(_sl_geom())))
+
+
+def _saveload_rows():
+    global _sl_scroll
+    g = _sl_geom()
+    _sl_scroll = max(0, min(_sl_scroll, _sl_max_scroll(g)))
+    top, bottom = g['list_top'], g['list_bottom']
+    inner_x = g['px'] + 24
+    inner_w = g['pw'] - 44
+    rows = []
+    for i, slot in enumerate(_sl_slots):
+        y = top + i * _SL_ROW_PITCH - _sl_scroll
+        if y + _SL_ROW_H < top or y > bottom:
+            continue
+        row = pygame.Rect(inner_x, y, inner_w, _SL_ROW_H)
+        btn_h = 40
+        by = row.y + (_SL_ROW_H - btn_h) // 2
+        bx = row.right - 16
+        btns = {}
+        for act in ('save', 'load', 'ren', 'del'):
+            r = pygame.Rect(bx - _SL_BTN_W, by, _SL_BTN_W, btn_h)
+            btns[act] = r
+            bx = r.x - _SL_BTN_GAP
+        rows.append((slot, row, btns))
+    return g, rows
+
+
+def _slot_exists(slot: int) -> bool:
+    meta = _slot_meta.get(slot) or {}
+    return bool(meta) and not meta.get('bad') and meta.get('cells', 0) > 0
+
+
+def _fit_text(text, font, maxw):
+    if maxw <= 0 or font.size(text)[0] <= maxw:
+        return text
+    while text and font.size(text + '…')[0] > maxw:
+        text = text[:-1]
+    return (text + '…') if text else '…'
+
+
+def _do_save_slot(slot: int) -> None:
+    save_slot(slot)
+
+
+def _do_load_slot(slot: int) -> None:
+    if not os.path.exists(_slot_path(slot)):
+        _note(trans('note.no_save'))
+        return
+    load_slot(slot)
+
+
+def _do_delete_slot(slot: int) -> None:
+    global last_slot, _sl_edit_slot, _sl_edit_buf, _saveload_sel, _sl_del_confirm_slot
+    _sl_del_confirm_slot = -1
+    path = _slot_path(slot)
+    try:
+        if os.path.exists(path):
+            os.remove(path)
+        if os.path.exists(path + '.tmp'):
+            os.remove(path + '.tmp')
+    except OSError as exc:
+        _note(trans('note.del_fail', slot=slot, err=exc))
+        return
+    _slot_names.pop(slot, None)
+    _slot_meta.pop(slot, None)
+    if last_slot == slot:
+        last_slot = 0
+    if _sl_edit_slot == slot:
+        _sl_edit_slot, _sl_edit_buf = -1, ''
+    _note(trans('note.deleted', slot=_slot_display_name(slot)))
+    _refresh_slot_status()
+    if _sl_slots:
+        if _saveload_sel not in _sl_slots:
+            _saveload_sel = _sl_slots[min(len(_sl_slots) - 1, max(0, 0))]
+        _ensure_selected_visible()
+    else:
+        _saveload_sel = 0
+
+
+def _do_new_save() -> None:
+    global _saveload_sel, _sl_edit_slot, _sl_edit_buf
+    slot = _next_free_slot()
+    nm = trans('sl.default_name', slot=slot)
+    if save_slot(slot, name=nm):
+        _saveload_sel = slot
+        _sl_edit_slot, _sl_edit_buf = slot, nm
+        _ensure_selected_visible()
+
+
+def _begin_rename(slot: int) -> None:
+    global _sl_edit_slot, _sl_edit_buf
+    _sl_edit_slot, _sl_edit_buf = slot, _slot_display_name(slot)
+
+
+def _commit_rename() -> None:
+    global _sl_edit_slot, _sl_edit_buf
+    if _sl_edit_slot < 0:
+        return
+    _rename_slot(_sl_edit_slot, _sl_edit_buf.strip())
+    _sl_edit_slot, _sl_edit_buf = -1, ''
+
+
+def _cancel_rename() -> None:
+    global _sl_edit_slot, _sl_edit_buf
+    _sl_edit_slot, _sl_edit_buf = -1, ''
+
+
+def _ensure_selected_visible() -> None:
+    global _sl_scroll
+    if _saveload_sel not in _sl_slots:
+        return
+    g = _sl_geom()
+    idx = _sl_slots.index(_saveload_sel)
+    top, bottom = g['list_top'], g['list_bottom']
+    row_top = top + idx * _SL_ROW_PITCH - _sl_scroll
+    row_bot = row_top + _SL_ROW_H
+    if row_top < top:
+        _sl_scroll += (row_top - top)
+    elif row_bot > bottom:
+        _sl_scroll += (row_bot - bottom)
+    _sl_clamp_scroll()
+
+
+def _draw_saveload_row(slot, row, btns, mouse):
+    meta = _slot_meta.get(slot) or {}
+    selected = (slot == _saveload_sel)
+    exists = _slot_exists(slot)
+    bad = bool(meta.get('bad'))
+    bg = pygame.Surface((row.w, row.h), pygame.SRCALPHA)
+    bg.fill(_tint(COLOR_ON, 60 if selected else 24))
+    screen.blit(bg, (row.x, row.y))
+    pygame.draw.rect(screen, COLOR_ON if selected else COLOR_OFF, row, 2)
+    editing = (_sl_edit_slot == slot)
+    left_x = row.x + 16
+    name_maxw = max(40, btns['del'].x - left_x - 16)
+    if editing:
+        disp = _sl_edit_buf + ('|' if (pygame.time.get_ticks() // 400) % 2 else '')
+        text_top = row.y + 9
+        nt = SL_FONT_ROW.render(_fit_text(disp, SL_FONT_ROW, name_maxw - 14), True, COLOR_ON)
+        ib = pygame.Rect(left_x - 4, text_top - 4,
+                         min(360, name_maxw) + 8, nt.get_height() + 8)
+        pygame.draw.rect(screen, COLOR_BG, ib)
+        pygame.draw.rect(screen, COLOR_ON, ib, 2)
+        screen.blit(nt, (left_x, text_top))
+        tip = SL_FONT_SUB.render(trans('sl.edit.tip'), True, COLOR_OFF)
+        screen.blit(tip, (left_x, row.y + 42))
+    else:
+        name = _slot_display_name(slot)
+        nt = SL_FONT_ROW.render(_fit_text(name, SL_FONT_ROW, name_maxw), True,
+                                COLOR_ON if (exists or selected) else COLOR_OFF)
+        screen.blit(nt, (left_x, row.y + 9))
+        if bad:
+            status = trans('sl.bad')
+        elif exists:
+            tstr = ''
+            if meta.get('mtime'):
+                tstr = '  ' + time.strftime('%m-%d %H:%M', time.localtime(meta['mtime']))
+            status = trans('sl.cells', cells=meta.get('cells', 0)) + tstr
+            if last_slot == slot:
+                status += '  *'
+        else:
+            status = trans('sl.empty')
+        st = SL_FONT_SUB.render(status, True, COLOR_ON if exists else COLOR_OFF)
+        screen.blit(st, (left_x, row.y + 40))
+    label_map = {'save': 'sl.btn.save', 'load': 'sl.btn.load',
+                 'ren': 'sl.btn.rename', 'del': 'sl.btn.del'}
+    for act, rect in btns.items():
+        if act == 'save':
+            enabled = True
+        elif act == 'load':
+            enabled = exists
+        elif act == 'ren':
+            enabled = True
+        else:
+            enabled = os.path.exists(_slot_path(slot))
+        hov = enabled and rect.collidepoint(mouse)
+        confirming = (act == 'del' and _sl_del_confirm_slot == slot)
+        acc = COLOR_ON
+        b = pygame.Surface((rect.w, rect.h), pygame.SRCALPHA)
+        b.fill(_tint(acc, 110 if (hov or confirming) else (40 if enabled else 16)))
+        screen.blit(b, (rect.x, rect.y))
+        pygame.draw.rect(screen, acc if enabled else COLOR_OFF, rect,
+                         2 if (hov or confirming) else 1)
+        _lbl = label_map[act]
+        if act == 'del' and _sl_del_confirm_slot == slot:
+            _lbl = 'sl.btn.del.confirm'
+        lt = SL_FONT_BTN.render(trans(_lbl), True,
+                                COLOR_ON if enabled else COLOR_OFF)
+        screen.blit(lt, (rect.x + rect.w // 2 - lt.get_width() // 2,
+                         rect.y + rect.h // 2 - lt.get_height() // 2))
+
+
+def _draw_saveload() -> None:
+    g, rows = _saveload_rows()
+    win_w, win_h = g['win_w'], g['win_h']
+    px, py, pw, ph = g['px'], g['py'], g['pw'], g['ph']
+    panel = pygame.Surface((pw, ph), pygame.SRCALPHA)
+    panel.fill(_tint(COLOR_BG, 255))
+    screen.blit(panel, (px, py))
+    pygame.draw.rect(screen, COLOR_ON, (px, py, pw, ph), 2)
+    title = SL_FONT_HEAD.render(trans('sl.title'), True, COLOR_ON)
+    screen.blit(title, (px + 28, py + 16))
+    cur_txt = trans('sl.cur', cells=len(grid_data),
+                    dirty=trans('sl.dirty') if world_dirty else '')
+    cur = SL_FONT_SUB.render(cur_txt, True, COLOR_OFF)
+    screen.blit(cur, (px + 30, py + 60))
+    cnt = SL_FONT_SUB.render(trans('sl.count', n=len(_sl_slots)), True, COLOR_OFF)
+    screen.blit(cnt, (px + 30, py + 82))
+    mouse = pygame.mouse.get_pos()
+    nb = g['new_btn']
+    hov = nb.collidepoint(mouse)
+    b = pygame.Surface((nb.w, nb.h), pygame.SRCALPHA)
+    b.fill(_tint(COLOR_ON, 95 if hov else 42))
+    screen.blit(b, nb)
+    pygame.draw.rect(screen, COLOR_ON, nb, 2 if hov else 1)
+    lt = SL_FONT_BTN.render(trans('sl.new'), True, COLOR_ON)
+    screen.blit(lt, (nb.x + nb.w // 2 - lt.get_width() // 2,
+                     nb.y + nb.h // 2 - lt.get_height() // 2))
+    view = pygame.Rect(px, g['list_top'], pw, g['list_bottom'] - g['list_top'])
+    old_clip = screen.get_clip()
+    screen.set_clip(view)
+    for slot, row, btns in rows:
+        _draw_saveload_row(slot, row, btns, mouse)
+    screen.set_clip(old_clip)
+    track = pygame.Rect(px + pw - 14, g['list_top'], 6,
+                        g['list_bottom'] - g['list_top'])
+    _draw_scrollbar(track, len(_sl_slots) * _SL_ROW_PITCH,
+                    g['list_bottom'] - g['list_top'], _sl_scroll)
+    hint = SL_FONT_SUB.render(
+        trans('sl.hint', cl=_key_label(KEYMAP['save_1'])),
+        True, COLOR_OFF)
+    screen.blit(hint, (win_w // 2 - hint.get_width() // 2, py + ph - 32))
+
+
+def _handle_saveload_event(event) -> bool:
+    global _saveload_open, _saveload_sel, _sl_scroll, _sl_edit_slot, _sl_edit_buf, _sl_del_confirm_slot
+    if _sl_edit_slot >= 0:
+        if event.type == pygame.TEXTINPUT:
+            for ch in event.text:
+                if ch.isprintable() and len(_sl_edit_buf) < 32:
+                    _sl_edit_buf += ch
+            return True
+        if event.type == pygame.KEYDOWN:
+            if event.key == pygame.K_BACKSPACE:
+                _sl_edit_buf = _sl_edit_buf[:-1]
+            elif event.key in (pygame.K_RETURN, pygame.K_KP_ENTER):
+                _commit_rename()
+            elif event.key == pygame.K_ESCAPE:
+                _cancel_rename()
+            return True
+        if event.type == pygame.MOUSEBUTTONDOWN and event.button == 1:
+            _commit_rename()
+            return True
+        return True
+    if event.type == pygame.MOUSEWHEEL:
+        g = _sl_geom()
+        _sl_scroll = max(0, min(_sl_scroll - event.y * _SL_ROW_PITCH,
+                                _sl_max_scroll(g)))
+        return True
+    if event.type == pygame.MOUSEBUTTONDOWN:
+        if event.button == 1:
+            g = _sl_geom()
+            if g['new_btn'].collidepoint(event.pos):
+                _sl_del_confirm_slot = -1
+                _do_new_save()
+                return True
+            _g, rows = _saveload_rows()
+            for slot, row, btns in rows:
+                for act, rect in btns.items():
+                    if not rect.collidepoint(event.pos):
+                        continue
+                    if act == 'save':
+                        _sl_del_confirm_slot = -1
+                        _do_save_slot(slot)
+                    elif act == 'load' and _slot_exists(slot):
+                        _sl_del_confirm_slot = -1
+                        _do_load_slot(slot)
+                    elif act == 'ren':
+                        _sl_del_confirm_slot = -1
+                        _begin_rename(slot)
+                    elif act == 'del' and os.path.exists(_slot_path(slot)):
+                        if _sl_del_confirm_slot == slot:
+                            _do_delete_slot(slot)
+                        else:
+                            _sl_del_confirm_slot = slot
+                    return True
+                if row.collidepoint(event.pos):
+                    _saveload_sel = slot
+                    _sl_del_confirm_slot = -1
+                    return True
+            if not pygame.Rect(g['px'], g['py'], g['pw'], g['ph']).collidepoint(event.pos):
+                _saveload_open = False
+                _sl_del_confirm_slot = -1
+        return True
+    if event.type == pygame.KEYDOWN:
+        if event.key in (KEY_BACK, KEY_SAVE_MENU, pygame.K_ESCAPE):
+            _saveload_open = False
+            _sl_del_confirm_slot = -1
+            return True
+        if _sl_slots:
+            idx = _sl_slots.index(_saveload_sel) if _saveload_sel in _sl_slots else 0
+            if event.key == pygame.K_UP:
+                _saveload_sel = _sl_slots[(idx - 1) % len(_sl_slots)]
+                _ensure_selected_visible()
+            elif event.key == pygame.K_DOWN:
+                _saveload_sel = _sl_slots[(idx + 1) % len(_sl_slots)]
+                _ensure_selected_visible()
+        return True
+    return True
+
+
+
 _PERF: Dict[str, float] = {'solve_ms': 0.0}
 perf_visible = False
 PERF_FONT = _load_font(14)
@@ -2889,13 +3431,15 @@ def main():
                      pygame.time.get_ticks() - _game_esc_time < _ESC_RETURN_WIN
         scene_dirty = (_got_event or cam_moved or solved_this_frame or
                        delete_held or place_held or perf_visible or
-                       esc_active or esc_active != _prev_esc_active)
+                       esc_active or esc_active != _prev_esc_active or _saveload_open)
         _prev_esc_active = esc_active
         if scene_dirty:
             draw_scene(cached_ray_segments)
             _draw_game_esc_hint()
             if perf_visible:
                 _draw_perf_panel()
+            if _saveload_open:
+                _draw_saveload()
             pygame.display.flip()
 
 if __name__ == '__main__':
